@@ -1,23 +1,35 @@
-# TomTom data examples
+# TomTom traffic data sample notebooks
 
-Notebooks for working with TomTom traffic data on Databricks, Microsoft Fabric and Snowflake.
+Runnable notebooks for TomTom traffic datasets — historical **traffic speed**, **travel times**
+and **AADT traffic volumes** per road segment — published as free samples on the data
+marketplaces and read here through Delta Sharing.
 
-- **`getting-started/`** — one notebook per data product. From a share you have just attached to
-  a first result, in a few minutes.
-- **`use-cases/`** — worked examples that answer a question end to end.
+- **[`getting-started/`](getting-started/)** — one notebook per dataset. From a share you have
+  just attached to a first result, in a few minutes.
+- **[`use-cases/`](use-cases/)** — worked examples that answer a question end to end.
+- **[`docs/`](docs/)** — how to get the data and run the notebooks on each platform.
+
+Databricks is covered today. Microsoft Fabric is next.
+
+## The datasets
+
+| Dataset | What it measures | Documentation |
+|---|---|---|
+| TomTom Traffic Stats | Speed and travel time per road segment by hour, from anonymised probe vehicles: harmonic mean speed, speed percentiles, standard deviation, sample counts, and the road network the measurements sit on | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
+| TomTom Traffic Volumes | Annual average daily traffic (AADT) per road segment, with day-of-week and hour-of-day profiles | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
+
+Both carry an H3 cell at resolution 9 on every segment, so they join to each other and to your
+own data without map matching. Traffic Stats also carries OpenStreetMap way IDs, so the output of
+a map matcher joins straight in.
 
 ## Getting the data
 
-The data is not in this repository. It is published as free samples on the data marketplaces, and
-every notebook here expects one to be attached.
+The data is not in this repository. Each dataset is published as a free sample on the data
+marketplaces, and every notebook here expects one to be attached.
 
-| Product | What it is | Documentation |
-|---|---|---|
-| TomTom Traffic Stats | Hourly speed and travel time statistics per road segment, measured from anonymised probe vehicles | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
-| TomTom Traffic Volumes | Annual average daily traffic per road segment, with a day and hour profile | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
-
-On Databricks Marketplace, search either name. The samples are free and instantly available: you
-accept the terms, name a catalog, and the tables appear in it read only.
+On Databricks Marketplace, search for either dataset name. The samples are free and instantly
+available: accept the terms, keep the suggested catalog name, and the tables appear in it read
+only. Step-by-step instructions are in **[docs/databricks.md](docs/databricks.md)**.
 
 The samples are geographic extracts rather than whole countries, and coverage varies by road
 class. Each listing description carries the measured figures, and the getting started notebooks
@@ -38,13 +50,15 @@ data, which is why they are separate files rather than one file with branches.
 ## Layout
 
 ```
-getting-started/<product>/<platform>
+docs/<platform>.md
+getting-started/<dataset>/<platform>
 use-cases/<use case>/<platform>
 ```
 
 ## Licence and support
 
-Use of the data is governed by the
+The code in this repository is Apache-2.0. It does not cover the data: use of the data is
+governed by the
 [TomTom terms and conditions](https://docs.tomtom.com/legal/terms-and-conditions).
 
 Questions about a dataset or a marketplace listing: `marketplacesupport@tomtom.com`.
