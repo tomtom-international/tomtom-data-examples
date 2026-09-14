@@ -43,16 +43,19 @@ For a wider extract, more history, or a commercial licence, contact
 Each notebook takes its catalog name as a parameter, defaulting to the name the marketplace
 suggests at install. Accept the suggested name and nothing needs editing.
 
-The platform is the filename, so `databricks.py` and `fabric.ipynb` sit side by side in the same
+A filename is the notebook's subject and the platform it runs on, so
+`traffic_stats_databricks.py` and `traffic_stats_fabric.ipynb` sit side by side in the same
 folder. The analysis is the same in each; what differs is how the platform reads and displays
-data, which is why they are separate files rather than one file with branches.
+data, which is why they are separate files rather than one file with branches. The name has to
+carry the subject because importing a notebook into a workspace drops its folder, and a
+marketplace listing shows nothing but the name.
 
 ## Layout
 
 ```
 docs/<platform>.md
-getting-started/<dataset>/<platform>
-use-cases/<use case>/<platform>
+getting-started/<dataset>/<dataset>_<platform>
+use-cases/<use case>/<use case>_<platform>
 ```
 
 ## Licence and support

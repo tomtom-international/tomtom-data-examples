@@ -42,6 +42,12 @@ notebook at once.
 No credentials are needed — the repository is public. The `.py` files open as notebooks, and
 **Pull** in the Git folder brings in any later changes.
 
+| Notebook | Needs |
+|---|---|
+| `getting-started/traffic-stats/traffic_stats_databricks.py` | Traffic Stats |
+| `getting-started/traffic-volumes/traffic_volumes_databricks.py` | Traffic Volumes |
+| `use-cases/territory-risk-assessment/territory_risk_assessment_databricks.py` | both |
+
 Individual notebooks are also attached to the Marketplace listings under **Sample notebook**,
 where **Preview notebook** then **Import notebook** copies one into your workspace.
 
