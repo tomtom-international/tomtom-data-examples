@@ -31,25 +31,19 @@ Each dataset arrives as one catalog containing one schema:
 
 ## 2. Get the notebooks
 
-**Clone this repository as a Git folder.** This is the quickest route and gives you every
-notebook at once.
+Each listing carries its notebooks under **Sample notebook**. Click **Preview notebook**, then
+**Import notebook**, and it lands in your workspace ready to run.
 
-1. In the sidebar, click **Workspace**, then **Create > Git folder**.
-2. Git repository URL: `https://github.com/tomtom-international/tomtom-data-examples`
-3. Git provider: **GitHub**. Leave the folder name as it is.
-4. Click **Create Git folder**.
+| Notebook | Attached to | Datasets it needs |
+|---|---|---|
+| `traffic_stats_databricks` | TomTom Traffic Stats | Traffic Stats |
+| `traffic_volumes_databricks` | TomTom Traffic Volumes | Traffic Volumes |
+| `territory_risk_assessment_databricks` | both listings | both |
 
-No credentials are needed — the repository is public. The `.py` files open as notebooks, and
-**Pull** in the Git folder brings in any later changes.
-
-| Notebook | Needs |
-|---|---|
-| `getting-started/traffic-stats/traffic_stats_databricks.py` | Traffic Stats |
-| `getting-started/traffic-volumes/traffic_volumes_databricks.py` | Traffic Volumes |
-| `use-cases/territory-risk-assessment/territory_risk_assessment_databricks.py` | both |
-
-Individual notebooks are also attached to the Marketplace listings under **Sample notebook**,
-where **Preview notebook** then **Import notebook** copies one into your workspace.
+The same notebooks are the `.py` files in this repository, one folder per subject. To run one
+from here instead, copy its contents into a new Python notebook: the
+`# Databricks notebook source` header and the `# COMMAND ----------` separators are what split it
+back into cells.
 
 ## 3. Run
 
