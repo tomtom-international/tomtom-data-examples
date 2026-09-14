@@ -241,6 +241,11 @@ display(
 # MAGIC the scaling is relative to this extract, the score ranks segments within it and is not
 # MAGIC comparable across releases.
 # MAGIC
+# MAGIC A factor that does not vary across the extract carries no information, so it
+# MAGIC contributes nothing rather than invalidating the score. That is what the `coalesce`
+# MAGIC around each term is for: over a single day every segment here has exactly 24 measured
+# MAGIC hours, so `hours_measured` is constant and drops out on its own.
+# MAGIC
 # MAGIC It is also relative to the **date window** at the top of this notebook, which is one
 # MAGIC Wednesday by default: 2.59M segments and 38.4M hourly rows, an eighth of the week and
 # MAGIC ample for ranking. Widening it to the full week does not simply sharpen the score. Two
@@ -265,11 +270,11 @@ spark.sql(
     SELECT
         m.*,
         round(
-              0.25 * (m.avg_speed_kph  - s.lo_speed)     / nullif(s.hi_speed - s.lo_speed, 0)
-            + 0.25 * (m.variability    - s.lo_var)       / nullif(s.hi_var - s.lo_var, 0)
-            + 0.20 * (m.congestion_pct - s.lo_cong)      / nullif(s.hi_cong - s.lo_cong, 0)
-            + 0.15 * (m.speeding_pct   - s.lo_speed_pct) / nullif(s.hi_speed_pct - s.lo_speed_pct, 0)
-            + 0.15 * (m.hours_measured - s.lo_hours)     / nullif(s.hi_hours - s.lo_hours, 0)
+              0.25 * coalesce((m.avg_speed_kph  - s.lo_speed)     / nullif(s.hi_speed - s.lo_speed, 0), 0)
+            + 0.25 * coalesce((m.variability    - s.lo_var)       / nullif(s.hi_var - s.lo_var, 0), 0)
+            + 0.20 * coalesce((m.congestion_pct - s.lo_cong)      / nullif(s.hi_cong - s.lo_cong, 0), 0)
+            + 0.15 * coalesce((m.speeding_pct   - s.lo_speed_pct) / nullif(s.hi_speed_pct - s.lo_speed_pct, 0), 0)
+            + 0.15 * coalesce((m.hours_measured - s.lo_hours)     / nullif(s.hi_hours - s.lo_hours, 0), 0)
         , 4) AS risk_score
     FROM segment_metrics m CROSS JOIN span s
     """
@@ -370,6 +375,16 @@ if len(worst):
         # OpenStreetMap rather than one of the CartoDB styles: those now need an API key, and
         # folium still offers them, so the map renders with a warning and no basemap.
         tiles="OpenStreetMap",
+    )
+    # The default OpenStreetMap tiles carry enough colour of their own to compete with the
+    # data drawn on top. Desaturating the tile pane leaves the basemap as context and the
+    # overlay as the only colour on the map. Leaflet keeps vectors in a separate pane, so
+    # this does not touch the segments.
+    chart.get_root().header.add_child(
+        folium.Element(
+            "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}"
+            "</style>"
+        )
     )
     shade = mcolors.Normalize(vmin=worst.risk_score.min(), vmax=worst.risk_score.max())
 
