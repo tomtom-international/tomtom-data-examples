@@ -312,6 +312,16 @@ if len(city):
         # folium still offers them, so the map renders with a warning and no basemap.
         tiles="OpenStreetMap",
     )
+    # The default OpenStreetMap tiles carry enough colour of their own to compete with the
+    # data drawn on top. Desaturating the tile pane leaves the basemap as context and the
+    # overlay as the only colour on the map. Leaflet keeps vectors in a separate pane, so
+    # this does not touch the segments.
+    chart.get_root().header.add_child(
+        folium.Element(
+            "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}"
+            "</style>"
+        )
+    )
     # Volume spans orders of magnitude, so shade on a log scale or every road but the
     # busiest looks the same.
     shade = mcolors.LogNorm(vmin=max(city.aadt.min(), 1), vmax=city.aadt.max())

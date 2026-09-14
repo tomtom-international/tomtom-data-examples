@@ -184,9 +184,13 @@ display(
 # MAGIC %md
 # MAGIC ## 3. The map
 # MAGIC
-# MAGIC Each H3 cell drawn as a hexagon, shaded by score. Capped at the highest scoring cells,
-# MAGIC because each hexagon is an SVG path and a few thousand of them is as much as a notebook
-# MAGIC will render.
+# MAGIC Resolution 9 is the right grain to score on and the wrong grain to draw. There are
+# MAGIC 224,000 of those cells here, each about 0.1 km2, and a notebook will render a few
+# MAGIC hundred polygons before it gives up. Rolling the same scores up to resolution 6, about
+# MAGIC 36 km2, covers the whole extract in roughly 2,000 hexagons.
+# MAGIC
+# MAGIC Exposure does the weighting, so a cell reads as the risk a vehicle there actually
+# MAGIC meets rather than an average that counts an empty lane the same as a motorway.
 
 # COMMAND ----------
 
@@ -197,26 +201,55 @@ display(
 import folium
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-from h3 import cell_to_boundary
+from h3 import cell_to_boundary, cell_to_latlng
 
-TOP_CELLS = 600
+MAP_RESOLUTION = 6
 
-top = spark.sql(
-    f"SELECT h3_r9, total_aadt, mean_speed_kph, speeding_pct, risk_score "
-    f"FROM territory_risk ORDER BY risk_score DESC LIMIT {TOP_CELLS}"
+area = spark.sql(
+    f"""
+    SELECT h3_toparent(h3_r9, {MAP_RESOLUTION})                        AS cell,
+           sum(total_aadt)                                             AS total_aadt,
+           round(sum(risk_score * total_aadt) / sum(total_aadt), 3)     AS risk_score,
+           round(sum(mean_speed_kph * total_aadt) / sum(total_aadt), 1) AS mean_speed_kph,
+           round(sum(speeding_pct * total_aadt) / sum(total_aadt), 1)   AS speeding_pct,
+           count(*)                                                     AS cells_r9
+    FROM territory_risk
+    GROUP BY 1
+    """
 ).toPandas()
 
-centre = cell_to_boundary(top.h3_r9.iloc[0])[0]
-chart = folium.Map(location=centre, zoom_start=11, tiles="OpenStreetMap")
-shade = mcolors.Normalize(vmin=top.risk_score.min(), vmax=top.risk_score.max())
+print(f"{len(area):,} cells at resolution {MAP_RESOLUTION}, "
+      f"rolled up from {area.cells_r9.sum():,} scored cells")
 
-for row in top.itertuples():
+centres = [cell_to_latlng(c) for c in area.cell]
+chart = folium.Map(
+    location=[sum(c[0] for c in centres) / len(centres),
+              sum(c[1] for c in centres) / len(centres)],
+    zoom_start=9,
+    # OpenStreetMap rather than one of the CartoDB styles: those now need an API key, and
+    # folium still offers them, so the map renders with a warning and no basemap.
+    tiles="OpenStreetMap",
+)
+# The default tiles carry enough colour of their own to compete with the data drawn on top.
+# Desaturating the tile pane leaves the basemap as context and the choropleth as the only
+# colour. Leaflet keeps vectors in a separate pane, so this does not touch the hexagons.
+chart.get_root().header.add_child(
+    folium.Element(
+        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
+    )
+)
+
+# Shade on rank rather than on the score itself. Exposure is heavily skewed, so a linear scale
+# spends most of its colour on a handful of motorway cells and leaves everything else flat.
+rank = area.risk_score.rank(pct=True)
+
+for row, shade in zip(area.itertuples(), rank):
     folium.Polygon(
-        locations=cell_to_boundary(row.h3_r9),
+        locations=cell_to_boundary(row.cell),
         color=None,
         fill=True,
-        fill_color=mcolors.to_hex(cm.YlOrRd(shade(row.risk_score))),
-        fill_opacity=0.7,
+        fill_color=mcolors.to_hex(cm.YlOrRd(shade)),
+        fill_opacity=0.55,
         tooltip=(
             f"score {row.risk_score:.2f}, {row.total_aadt:,} AADT, "
             f"{row.mean_speed_kph:.0f} km/h, speeding in {row.speeding_pct:.0f}% of hours"
