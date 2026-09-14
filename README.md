@@ -1,13 +1,13 @@
-# TomTom traffic data sample notebooks
+# TomTom Data Samples and Use Cases
 
-Runnable notebooks for TomTom traffic datasets — historical **traffic speed**, **travel times**
-and **AADT traffic volumes** per road segment — published as free samples on the data
-marketplaces and read here through Delta Sharing.
+Runnable notebooks for TomTom data published as free samples on the data marketplaces: historical
+**traffic speed**, **travel times** and **AADT traffic volumes** per road segment, read here
+through Delta Sharing.
 
-- **[`getting-started/`](getting-started/)** — one notebook per dataset. From a share you have
-  just attached to a first result, in a few minutes.
-- **[`use-cases/`](use-cases/)** — worked examples that answer a question end to end.
-- **[`docs/`](docs/)** — how to get the data and run the notebooks on each platform.
+- **[`getting-started/`](getting-started/)**: one notebook per dataset. From a share you have just
+  attached to a first result, in a few minutes.
+- **[`use-cases/`](use-cases/)**: worked examples that answer a question end to end.
+- **[`docs/`](docs/)**: how to get the data and run the notebooks on each platform.
 
 Databricks is covered today. Microsoft Fabric is next.
 
@@ -16,7 +16,7 @@ Databricks is covered today. Microsoft Fabric is next.
 | Dataset | What it measures | Documentation |
 |---|---|---|
 | TomTom Traffic Stats | Speed and travel time per road segment by hour, from anonymised probe vehicles: harmonic mean speed, speed percentiles, standard deviation, sample counts, and the road network the measurements sit on | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
-| TomTom Traffic Volumes | Annual average daily traffic (AADT) per road segment, with day-of-week and hour-of-day profiles | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
+| TomTom Traffic Volumes | Annual average daily traffic (AADT) per road segment, with day of week and hour of day profiles | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
 
 Both carry an H3 cell at resolution 9 on every segment, so they join to each other and to your
 own data without map matching. Traffic Stats also carries OpenStreetMap way IDs, so the output of
@@ -29,7 +29,7 @@ marketplaces, and every notebook here expects one to be attached.
 
 On Databricks Marketplace, search for either dataset name. The samples are free and instantly
 available: accept the terms, keep the suggested catalog name, and the tables appear in it read
-only. Step-by-step instructions are in **[docs/databricks.md](docs/databricks.md)**.
+only. Step by step instructions are in **[docs/databricks.md](docs/databricks.md)**.
 
 The samples are geographic extracts rather than whole countries, and coverage varies by road
 class. Each listing description carries the measured figures, and the getting started notebooks
@@ -46,9 +46,9 @@ suggests at install. Accept the suggested name and nothing needs editing.
 A filename is the notebook's subject and the platform it runs on, so
 `traffic_stats_databricks.py` and `traffic_stats_fabric.ipynb` sit side by side in the same
 folder. The analysis is the same in each; what differs is how the platform reads and displays
-data, which is why they are separate files rather than one file with branches. The name has to
-carry the subject because importing a notebook into a workspace drops its folder, and a
-marketplace listing shows nothing but the name.
+data, which is why they are separate files rather than one file with branches. The name carries
+the subject because importing a notebook into a workspace drops its folder, and a marketplace
+listing shows nothing but the name.
 
 ## Layout
 
