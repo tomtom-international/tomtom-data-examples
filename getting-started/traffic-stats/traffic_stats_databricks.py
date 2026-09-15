@@ -46,10 +46,39 @@ except Exception as error:
         f"the listing. Run SHOW CATALOGS if you are not sure what it was called."
     ) from None
 
-segments = f"{catalog}.traffic_stats_batch.segments"
-hourly = f"{catalog}.traffic_stats_batch.hourly_stats"
+# The share covers four metropolitan areas. A whole-share query is a fair amount of data for a
+# first look, so the notebook scopes itself to one of them and everything below reads the two
+# views rather than the shared tables. `hourly_stats` has no region column, so it is scoped by
+# the Morton tiles the region was delivered in.
+dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
+region = dbutils.widgets.get("region")
 
-# `hourly_stats` is partitioned by `observation_date` and holds 322 million rows across a
+spark.sql(
+    f"""
+    CREATE OR REPLACE TEMP VIEW segments AS
+    SELECT * FROM {catalog}.traffic_stats_batch.segments WHERE region = '{region}'
+    """
+)
+
+tiles = [row.tile_id for row in spark.sql("SELECT DISTINCT tile_id FROM segments").collect()]
+if not tiles:
+    raise ValueError(
+        f"No segments in region '{region}'. Run "
+        f"SELECT DISTINCT region FROM {catalog}.traffic_stats_batch.segments to see the names."
+    )
+
+spark.sql(
+    f"""
+    CREATE OR REPLACE TEMP VIEW hourly_stats AS
+    SELECT * FROM {catalog}.traffic_stats_batch.hourly_stats
+    WHERE tile_id IN ({", ".join(repr(t) for t in tiles)})
+    """
+)
+
+segments = "segments"
+hourly = "hourly_stats"
+
+# `hourly_stats` is partitioned by `observation_date` and holds 922 million rows across a
 # complete week. Reading all of it to demonstrate a scoring method is waste on both sides, so
 # this notebook works one day at a time and the day is a widget.
 #
@@ -343,7 +372,12 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from shapely import wkt
 
-AREA = (-0.25, 51.45, 0.05, 51.58)  # west, south, east, north
+# Centred on where the region's segments actually are, which puts the box over the dense urban
+# core rather than the middle of the extract's bounding box.
+centre = spark.sql(
+    f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}"
+).first()
+AREA = (centre.lon - 0.15, centre.lat - 0.065, centre.lon + 0.15, centre.lat + 0.065)
 
 # Each segment becomes its own SVG path with its own tooltip, so the map is the one output in
 # this notebook that can outgrow what a notebook will render. The whole top fifth inside this
@@ -422,8 +456,9 @@ else:
 # MAGIC two patterns differ enough that pooling them hides both.
 # MAGIC
 # MAGIC **Add volume.** Speed says how bad it is, volume says how many people it happens to.
-# MAGIC TomTom Traffic Volumes is a separate Marketplace listing covering the same London box,
-# MAGIC and both datasets carry `h3_r9`, so the two join without any map matching.
+# MAGIC TomTom Traffic Volumes is a separate Marketplace listing covering the same four
+# MAGIC metropolitan areas, and both datasets carry `h3_r9`, so the two join without any map
+# MAGIC matching.
 # MAGIC
 # MAGIC Because they are separate listings they arrive as separate catalogs. The query below
 # MAGIC assumes the suggested names, `TomTom_Traffic_Stats` and `TomTom_Traffic_Volumes`;
@@ -445,7 +480,7 @@ else:
 # MAGIC volume AS (
 # MAGIC   SELECT h3_r9, sum(aadt) AS total_aadt
 # MAGIC   FROM TomTom_Traffic_Volumes.traffic_volumes.aadt_segments
-# MAGIC   WHERE region = 'london' AND vintage_year = 2025
+# MAGIC   WHERE region = 'london' AND vintage_year = 2025  -- same region as the widget above
 # MAGIC   GROUP BY h3_r9
 # MAGIC )
 # MAGIC SELECT v.h3_r9, round(s.peak_speed_kph) AS peak_speed_kph, v.total_aadt
@@ -454,4 +489,5 @@ else:
 # MAGIC LIMIT 20
 # MAGIC ```
 # MAGIC
-# MAGIC The busiest cells in central London come back at 14 to 22 km/h in the morning peak.
+# MAGIC The busiest cells in central London come back at 14 to 22 km/h in the morning peak. The
+# MAGIC region name is the same on both sides, so swap both to compare another metro.

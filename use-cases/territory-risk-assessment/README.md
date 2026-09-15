@@ -2,8 +2,8 @@
 
 Rating geographic areas, and individual routes, for road risk from traffic speed and volume.
 
-**Data needed:** TomTom Traffic Stats and TomTom Traffic Volumes, both attached. They overlap on
-London, which is the area used here.
+**Data needed:** TomTom Traffic Stats and TomTom Traffic Volumes, both attached. They cover the
+same four metropolitan areas; the `region` widget picks one, and London is the default.
 
 ## The question
 

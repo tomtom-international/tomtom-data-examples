@@ -63,8 +63,8 @@ is not attached yet, or the catalog was given a different name at install. Set t
 to the name in Catalog Explorer.
 
 **A use-case notebook needs both datasets.** `use-cases/territory-risk-assessment` joins Traffic
-Stats to Traffic Volumes and needs both attached. They overlap on London, which is the area the
-notebook uses.
+Stats to Traffic Volumes and needs both attached. They cover the same four metropolitan areas,
+and the notebook picks one with a widget.
 
 **`DESCRIBE HISTORY` fails.** Expected. History is not shared, so the Delta commit log is not
 available on a shared table. Nothing in these notebooks depends on it.

@@ -21,14 +21,14 @@
 # MAGIC - **TomTom Traffic Stats** — hourly speeds per road segment
 # MAGIC - **TomTom Traffic Volumes** — annual average daily traffic per road segment
 # MAGIC
-# MAGIC They overlap on London, which is the area used below.
+# MAGIC They cover the same four metropolitan areas. The `region` widget below picks one.
 
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
 dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
 dbutils.widgets.text("observation_date", "2025-09-03", "Date to score, UTC")
-dbutils.widgets.text("region", "london", "Traffic Volumes region")
+dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
@@ -92,6 +92,7 @@ spark.sql(
         FROM {stats}.segments s
         JOIN {stats}.hourly_stats h USING (dseg_id)
         WHERE h.observation_date = DATE '{observation_date}'
+          AND s.region = '{region}'
           AND s.speed_limit_kph > 0
           AND h.harmonic_speed_kph > 0
           AND h.speed_percentiles_kph IS NOT NULL
@@ -293,6 +294,7 @@ display(
             SELECT s.dseg_id, s.street_name, s.speed_limit_kph, s.length_m
             FROM {stats}.segments s
             WHERE arrays_overlap(s.osm_way_ids, array({", ".join(f"{w}L" for w in MATCHED_OSM_WAYS)}))
+              AND s.region = '{region}'
               AND s.speed_limit_kph > 0
         ),
         per_segment AS (

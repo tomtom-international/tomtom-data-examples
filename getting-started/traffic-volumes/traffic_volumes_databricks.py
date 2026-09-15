@@ -353,8 +353,8 @@ else:
 # MAGIC
 # MAGIC **Combine with Traffic Stats.** Volume is exposure and speed is severity. Together they
 # MAGIC make a far better risk surface than either alone. TomTom Traffic Stats is a separate
-# MAGIC Marketplace listing covering the same London box, and both datasets carry `h3_r9`, so
-# MAGIC the two join without any map matching.
+# MAGIC Marketplace listing covering the same four metropolitan areas, and both datasets carry
+# MAGIC `h3_r9`, so the two join without any map matching.
 # MAGIC
 # MAGIC Because they are separate listings they arrive as separate catalogs. The query below
 # MAGIC assumes the suggested names, `TomTom_Traffic_Volumes` and `TomTom_Traffic_Stats`;
