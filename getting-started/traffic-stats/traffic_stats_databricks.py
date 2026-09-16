@@ -2,9 +2,7 @@
 # MAGIC %md
 # MAGIC # Getting started with TomTom Traffic Stats Batch
 # MAGIC
-# MAGIC Historical hourly speed statistics for individual road segments, measured from
-# MAGIC anonymised probe vehicles. This notebook goes from a share you just attached to a
-# MAGIC segment level risk score you can join your own data against.
+# MAGIC  Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles.
 # MAGIC
 # MAGIC | Table | One row per | Carries |
 # MAGIC |---|---|---|
@@ -13,9 +11,9 @@
 # MAGIC
 # MAGIC They join on `dseg_id`.
 # MAGIC
-# MAGIC **TomTom Traffic Volumes** is a separate listing, and it is the other half of most
-# MAGIC risk questions: how much traffic each road carries, rather than how fast it moves.
-# MAGIC Take it too and the last section here joins the two.
+# MAGIC **TomTom Traffic Volumes** is a separate listing holding how much traffic each road carries, rather than how fast it moves.
+# MAGIC Take it too and volume and speed can be read together; the last section here
+# MAGIC joins them.
 # MAGIC
 # MAGIC Three things to know before you start.
 # MAGIC
@@ -28,15 +26,13 @@
 # COMMAND ----------
 
 # The default is what Marketplace suggests when you install this listing, so accepting the
-# suggested name means this notebook runs unedited. Change the widget if you named it something
-# else. Capitalisation does not matter: Unity Catalog resolves identifiers case insensitively.
-dbutils.widgets.text("catalog", "TomTom_Traffic_Stats", "Catalog you attached the share as")
+# suggested name means this notebook runs unedited.
+dbutils.widgets.text(
+    "catalog", "TomTom_Traffic_Stats", "Catalog you attached the dataset as"
+)
 catalog = dbutils.widgets.get("catalog")
 
 try:
-    # Checked through SQL rather than `spark.catalog.databaseExists`, so the check resolves the
-    # name exactly the way every query below it will. Better to say this now than to let the
-    # first real query fail with a table-not-found several cells later.
     spark.sql(f"DESCRIBE SCHEMA {catalog}.traffic_stats_batch")
 except Exception as error:
     raise ValueError(
@@ -46,17 +42,42 @@ except Exception as error:
         f"the listing. Run SHOW CATALOGS if you are not sure what it was called."
     ) from None
 
-segments = f"{catalog}.traffic_stats_batch.segments"
-hourly = f"{catalog}.traffic_stats_batch.hourly_stats"
+# The dataset covers four metropolitan areas. A whole-dataset query is a fair amount of data for a
+# first look, so the notebook scopes itself to one of them
+dbutils.widgets.text(
+    "region", "london", "Region: london, austin, losangeles or melbourne"
+)
+region = dbutils.widgets.get("region")
 
-# `hourly_stats` is partitioned by `observation_date` and holds 322 million rows across a
-# complete week. Reading all of it to demonstrate a scoring method is waste on both sides, so
-# this notebook works one day at a time and the day is a widget.
+spark.sql(f"""
+    CREATE OR REPLACE TEMP VIEW segments AS
+    SELECT * FROM {catalog}.traffic_stats_batch.segments WHERE region = '{region}'
+    """)
+
+tiles = [
+    row.tile_id for row in spark.sql("SELECT DISTINCT tile_id FROM segments").collect()
+]
+if not tiles:
+    raise ValueError(
+        f"No segments in region '{region}'. Run "
+        f"SELECT DISTINCT region FROM {catalog}.traffic_stats_batch.segments to see the names."
+    )
+
+spark.sql(f"""
+    CREATE OR REPLACE TEMP VIEW hourly_stats AS
+    SELECT * FROM {catalog}.traffic_stats_batch.hourly_stats
+    WHERE tile_id IN ({", ".join(repr(t) for t in tiles)})
+    """)
+
+segments = "segments"
+hourly = "hourly_stats"
+
+# `hourly_stats` contains 922 million rows for a full week. To keep reads fast, this
+# notebook processes one day at a time.
 #
-# Wednesday 2025-09-03 by default: an ordinary midweek day, which is the usual baseline for
-# traffic work. Widen it to 2025-09-01 and 2025-09-07 for the whole week, but read the note
-# under the risk score first, because pooling weekdays with the weekend changes what the score
-# means rather than just making it more accurate.
+# The default is Wednesday, 2025-09-03, a typical midweek baseline. Set the dates to
+# 2025-09-01 and 2025-09-07 to process the full week. See the risk score note first:
+# combining weekdays and weekends changes what the score means.
 dbutils.widgets.text("date_from", "2025-09-03", "First observation date")
 dbutils.widgets.text("date_to", "2025-09-03", "Last observation date")
 date_from = dbutils.widgets.get("date_from")
@@ -65,53 +86,43 @@ date_to = dbutils.widgets.get("date_to")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. What is in the share
+# MAGIC ## 1. What is in the database
 # MAGIC
 # MAGIC Every column carries a description. `DESCRIBE TABLE` is worth a minute here, because
 # MAGIC several fields have an edge that is cheaper to learn now than inside a model.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT count(*) AS segments, round(sum(length_m) / 1000) AS network_km,
                count(DISTINCT country_iso3) AS countries, min(min_lat) AS south,
                max(max_lat) AS north, min(min_lon) AS west, max(max_lon) AS east
         FROM {segments}
-        """
-    )
-)
+        """))
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT min(observation_date) AS first_date, max(observation_date) AS last_date,
                count(DISTINCT observation_date) AS days, count(*) AS hourly_rows,
                round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
                    AS pct_rows_without_percentiles
         FROM {hourly}
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Road class decides almost everything
+# MAGIC ## 2. Road class matters most
 # MAGIC
-# MAGIC Functional Road Class runs from 0, a motorway, to 7, a quiet residential street. Most
-# MAGIC segments in any extract are minor roads, and most traffic is on the few major ones. An
-# MAGIC average taken across segments therefore describes a quiet suburb, not a city.
+# MAGIC Functional Road Class goes from 0 (motorway) to 7 (quiet residential street). Most
+# MAGIC segments are small roads, but most traffic uses the few major roads. An average across
+# MAGIC all segments therefore describes a quiet suburb, not a city.
 # MAGIC
-# MAGIC Coverage matters just as much. A segment exists in the map whether or not a probe
-# MAGIC vehicle ever drove it, and coverage follows traffic, so it falls away on small roads.
+# MAGIC Coverage also matters. A road can be on the map even if no probe vehicle used it. Since
+# MAGIC traffic is lower on small roads, they usually have less coverage.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         WITH observed AS (
             SELECT dseg_id, count(*) AS hours FROM {hourly} GROUP BY dseg_id
         )
@@ -126,23 +137,18 @@ display(
         LEFT JOIN observed o USING (dseg_id)
         GROUP BY s.frc
         ORDER BY s.frc
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Speed through the day, in local time
+# MAGIC ## 3. Daily speed by local time
 # MAGIC
-# MAGIC `from_utc_timestamp` plus `segments.time_zone` puts the measurements in the hour a
-# MAGIC driver would recognise. Skip that step and the morning peak lands in the wrong bucket.
+# MAGIC `from_utc_timestamp` and `segments.time_zone` convert measurements to local time.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT
             hour(from_utc_timestamp(
                 make_timestamp(year(h.observation_date), month(h.observation_date),
@@ -156,34 +162,29 @@ display(
         WHERE s.frc <= 4 AND s.speed_limit_kph > 0
         GROUP BY hour_local
         ORDER BY hour_local
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Three signals from the percentile array
 # MAGIC
-# MAGIC The percentiles are what make this more than an average.
+# MAGIC Percentiles show more than the average speed.
 # MAGIC
-# MAGIC **Speeding** is p85 above the posted limit. Traffic engineers set limits from the 85th
-# MAGIC percentile, so this marks roads where speeding is normal rather than occasional.
+# MAGIC **Speeding** means p85 is above the posted limit. This shows where speeding is common.
 # MAGIC
-# MAGIC **Congestion** is any hour whose harmonic mean falls below 60% of the limit. Congestion
-# MAGIC drives how often claims happen: low speeds, dense traffic, more contact.
+# MAGIC **Congestion** means the harmonic mean is below 60% of the limit. Low speeds and dense
+# MAGIC traffic can lead to more crashes.
 # MAGIC
-# MAGIC **Variability** is the standard deviation over the mean. Stop and go traffic on a road
-# MAGIC with an ordinary average is the pattern behind rear end collisions.
+# MAGIC **Variability** is the standard deviation divided by the mean. It shows stop-and-go traffic,
+# MAGIC even when the average speed looks normal.
 # MAGIC
-# MAGIC The array is ascending, 19 values, p5 through p95 in steps of 5, so p85 is the 17th.
-# MAGIC `element_at` counts from 1. The `arr[i]` form counts from 0 and would quietly give you
-# MAGIC p80.
+# MAGIC The array has 19 values, from p5 to p95 in steps of 5. p85 is the 17th value.
+# MAGIC `element_at` starts counting at 1. The `arr[i]` form starts at 0 and would return p80.
 
 # COMMAND ----------
 
-spark.sql(
-    f"""
+spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW segment_metrics AS
     WITH flagged AS (
         SELECT
@@ -215,49 +216,40 @@ spark.sql(
     FROM flagged
     GROUP BY dseg_id
     HAVING count(*) >= 24
-    """
-)
+    """)
 
-display(
-    spark.sql(
-        """
+display(spark.sql("""
         SELECT frc, count(*) AS segments,
                round(avg(speeding_pct), 1)     AS avg_speeding_pct,
                round(avg(congestion_pct), 1)   AS avg_congestion_pct,
                round(avg(variability), 3)      AS avg_variability
         FROM segment_metrics GROUP BY frc ORDER BY frc
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. One score per segment
 # MAGIC
-# MAGIC Five factors, each scaled to the range 0 to 1 across this extract, then weighted. The
-# MAGIC weights are illustrative. What matters is the shape of the join, not these numbers, so
-# MAGIC calibrate them against your own loss history before the score means anything. Because
-# MAGIC the scaling is relative to this extract, the score ranks segments within it and is not
-# MAGIC comparable across releases.
+# MAGIC Five factors are scaled from 0 to 1 across this extract and then weighted. The weights
+# MAGIC are examples. Calibrate them with your own loss history before using the score. Because
+# MAGIC the scaling is relative to this extract, the score ranks segments only within this extract
+# MAGIC and cannot be compared across releases.
 # MAGIC
-# MAGIC A factor that does not vary across the extract carries no information, so it
-# MAGIC contributes nothing rather than invalidating the score. That is what the `coalesce`
-# MAGIC around each term is for: over a single day every segment here has exactly 24 measured
-# MAGIC hours, so `hours_measured` is constant and drops out on its own.
+# MAGIC A factor with no variation adds no information, so it contributes nothing to the score.
+# MAGIC The `coalesce` around each term handles this case. For one day, every segment has exactly
+# MAGIC 24 measured hours, so `hours_measured` is constant and drops out.
 # MAGIC
-# MAGIC It is also relative to the **date window** at the top of this notebook, which is one
-# MAGIC Wednesday by default: 2.59M segments and 38.4M hourly rows, an eighth of the week and
-# MAGIC ample for ranking. Widening it to the full week does not simply sharpen the score. Two
-# MAGIC of the five components, `congestion_pct` and `speeding_pct`, are shares of measured
-# MAGIC hours, so adding Saturday and Sunday dilutes both on commuter roads and leaves roads
-# MAGIC busy at weekends looking comparatively worse. Score weekdays and weekends separately if
-# MAGIC you care about either.
+# MAGIC The score also depends on the **date window** at the top of this notebook. By default,
+# MAGIC it covers one Wednesday: 2.59M segments and 38.4M hourly rows. This is enough data for
+# MAGIC ranking. A full week does not necessarily improve the score. `congestion_pct` and
+# MAGIC `speeding_pct` are based on measured hours, so adding Saturday and Sunday dilutes them
+# MAGIC on commuter roads. Roads that are busy on weekends may then look worse. Score weekdays
+# MAGIC and weekends separately if needed.
 
 # COMMAND ----------
 
-spark.sql(
-    """
+spark.sql("""
     CREATE OR REPLACE TEMPORARY VIEW segment_risk AS
     WITH span AS (
         SELECT min(avg_speed_kph) AS lo_speed, max(avg_speed_kph) AS hi_speed,
@@ -277,37 +269,30 @@ spark.sql(
             + 0.15 * coalesce((m.hours_measured - s.lo_hours)     / nullif(s.hi_hours - s.lo_hours, 0), 0)
         , 4) AS risk_score
     FROM segment_metrics m CROSS JOIN span s
-    """
-)
+    """)
 
-display(
-    spark.sql(
-        """
+display(spark.sql("""
         SELECT dseg_id, frc, avg_speed_kph, variability, speeding_pct, congestion_pct,
                risk_score
         FROM segment_risk ORDER BY risk_score DESC LIMIT 20
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. Joining through H3 cells
+# MAGIC ## 6. Joining on H3 cells
 # MAGIC
-# MAGIC A road segment is an awkward thing to join against, because your own data is addresses
-# MAGIC and journeys and segment boundaries are arbitrary. `segments.h3_r9` holds the
-# MAGIC [H3](https://h3geo.org/) cell of the segment centroid at resolution 9, about 174 m
-# MAGIC across. Put the same cell on your own points and the join is one string comparison.
+# MAGIC Road segments can be hard to join with address and journey data. Their boundaries
+# MAGIC are arbitrary. `segments.h3_r9` stores the segment centroid's
+# MAGIC [H3](https://h3geo.org/) cell at resolution 9, about 174 m across. Add the same cell
+# MAGIC to your points, then join on it.
 # MAGIC
-# MAGIC Weight by length. A 2 km stretch of motorway should not count the same as a 30 m slip
+# MAGIC Weight results by length. A 2 km motorway section should count more than a 30 m slip
 # MAGIC road.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT
             s.h3_r9,
             count(*)                                                    AS segments,
@@ -319,18 +304,14 @@ display(
         HAVING count(*) >= 3
         ORDER BY risk_by_length DESC
         LIMIT 25
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7. Putting it on a map
+# MAGIC ## 7. Map the results
 # MAGIC
-# MAGIC Geometry is a WKT LineString in EPSG:4326. The bounding box columns exist so you can
-# MAGIC pick out an area first and parse geometry second, which is the difference between
-# MAGIC seconds and minutes. Change `AREA` to somewhere your extract covers.
+# MAGIC Geometry is a WKT LineString in EPSG:4326. Set `AREA` to a region in your extract.
 
 # COMMAND ----------
 
@@ -343,16 +324,16 @@ import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 from shapely import wkt
 
-AREA = (-0.25, 51.45, 0.05, 51.58)  # west, south, east, north
+# Centred on where the region's segments are
+centre = spark.sql(
+    f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}"
+).first()
+AREA = (centre.lon - 0.15, centre.lat - 0.065, centre.lon + 0.15, centre.lat + 0.065)
 
-# Each segment becomes its own SVG path with its own tooltip, so the map is the one output in
-# this notebook that can outgrow what a notebook will render. The whole top fifth inside this
-# box is around 26,000 segments, which Databricks truncates, and a truncated map shows nothing
-# at all. Raise this if you want more and know your renderer can take it.
+# Each segment becomes its own SVG path with its own tooltip, so we limit the rendered segments
 MAX_SEGMENTS_ON_MAP = 1500
 
-worst = spark.sql(
-    f"""
+worst = spark.sql(f"""
     SELECT s.geometry_wkt, s.street_name, s.frc, r.risk_score, r.avg_speed_kph,
            r.speeding_pct
     FROM segment_risk r
@@ -363,8 +344,7 @@ worst = spark.sql(
       AND r.risk_score >= (SELECT percentile_approx(risk_score, 0.8) FROM segment_risk)
     ORDER BY r.risk_score DESC
     LIMIT {MAX_SEGMENTS_ON_MAP}
-    """
-).toPandas()
+    """).toPandas()
 
 print(f"{len(worst):,} highest scoring major road segments in that box")
 
@@ -372,14 +352,8 @@ if len(worst):
     chart = folium.Map(
         location=((AREA[1] + AREA[3]) / 2, (AREA[0] + AREA[2]) / 2),
         zoom_start=12,
-        # OpenStreetMap rather than one of the CartoDB styles: those now need an API key, and
-        # folium still offers them, so the map renders with a warning and no basemap.
         tiles="OpenStreetMap",
     )
-    # The default OpenStreetMap tiles carry enough colour of their own to compete with the
-    # data drawn on top. Desaturating the tile pane leaves the basemap as context and the
-    # overlay as the only colour on the map. Leaflet keeps vectors in a separate pane, so
-    # this does not touch the segments.
     chart.get_root().header.add_child(
         folium.Element(
             "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}"
@@ -409,29 +383,27 @@ else:
 # MAGIC %md
 # MAGIC ## Where to go next
 # MAGIC
-# MAGIC **Use the harmonic mean for anything about travel time.** The plain average gives too
-# MAGIC much weight to the fastest vehicles and will make a slow road look acceptable.
+# MAGIC **Use the harmonic mean for travel time.** A regular average gives too much weight to
+# MAGIC the fastest vehicles and can make a slow road look faster than it is.
 # MAGIC
-# MAGIC **Use the whole distribution.** The percentiles answer questions an average cannot. How
-# MAGIC heavy is the tail above the limit. How much wider is the spread at 08:00 than at 14:00.
+# MAGIC **Use the whole distribution.** Percentiles show details that an average hides, such as
+# MAGIC how often speeds exceed the limit and how much speeds vary at 08:00 versus 14:00.
 # MAGIC
-# MAGIC **Join through OpenStreetMap.** `segments.osm_way_ids` means journeys already matched to
-# MAGIC OpenStreetMap need no second matching step.
+# MAGIC **Join through OpenStreetMap.** If journeys already have an OpenStreetMap match,
+# MAGIC `segments.osm_way_ids` lets you skip another matching step.
 # MAGIC
-# MAGIC **Split weekdays from weekends.** `observation_date` gives you the day of week, and the
-# MAGIC two patterns differ enough that pooling them hides both.
+# MAGIC **Separate weekdays and weekends.** Use `observation_date` to identify the day of week.
+# MAGIC Their traffic patterns differ, so combining them can hide useful information.
 # MAGIC
-# MAGIC **Add volume.** Speed says how bad it is, volume says how many people it happens to.
-# MAGIC TomTom Traffic Volumes is a separate Marketplace listing covering the same London box,
-# MAGIC and both datasets carry `h3_r9`, so the two join without any map matching.
+# MAGIC **Add volume.** Speed shows how bad traffic is; volume shows how many people it affects.
+# MAGIC TomTom Traffic Volumes is a separate Marketplace listing for the same four metropolitan
+# MAGIC areas. Both datasets include `h3_r9`, so you can join them without map matching.
 # MAGIC
-# MAGIC Because they are separate listings they arrive as separate catalogs. The query below
-# MAGIC assumes the suggested names, `TomTom_Traffic_Stats` and `TomTom_Traffic_Volumes`;
-# MAGIC substitute whatever you called them.
+# MAGIC The listings use separate catalogs. The query below uses the suggested names,
+# MAGIC `TomTom_Traffic_Stats` and `TomTom_Traffic_Volumes`; replace them with your catalog names.
 # MAGIC
-# MAGIC Total each side to one row per cell **before** joining. Joining first multiplies every
-# MAGIC volume row by the 21 hourly rows behind each segment, and the totals come out in the
-# MAGIC billions:
+# MAGIC First total each dataset to one row per cell. If you join first, each volume row is
+# MAGIC repeated for all 21 hourly rows in a segment, which makes the totals far too large:
 # MAGIC
 # MAGIC ```sql
 # MAGIC WITH speed AS (
@@ -445,7 +417,7 @@ else:
 # MAGIC volume AS (
 # MAGIC   SELECT h3_r9, sum(aadt) AS total_aadt
 # MAGIC   FROM TomTom_Traffic_Volumes.traffic_volumes.aadt_segments
-# MAGIC   WHERE region = 'london' AND vintage_year = 2025
+# MAGIC   WHERE region = 'london' AND vintage_year = 2025  -- same region as the widget above
 # MAGIC   GROUP BY h3_r9
 # MAGIC )
 # MAGIC SELECT v.h3_r9, round(s.peak_speed_kph) AS peak_speed_kph, v.total_aadt
@@ -454,4 +426,5 @@ else:
 # MAGIC LIMIT 20
 # MAGIC ```
 # MAGIC
-# MAGIC The busiest cells in central London come back at 14 to 22 km/h in the morning peak.
+# MAGIC The busiest cells in central London are typically 14 to 22 km/h during the morning peak.
+# MAGIC To compare another metro, change the region in both datasets.

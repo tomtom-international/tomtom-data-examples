@@ -18,26 +18,21 @@
 # MAGIC Two things to know before you start.
 # MAGIC
 # MAGIC 1. **Read `coverage` first.** This table holds only the segments that have an
-# MAGIC    estimate. On small roads much of the network has none, so an average taken here is
-# MAGIC    really an average over the roads that were busy enough to measure. `coverage` is
-# MAGIC    what tells you how much is missing.
-# MAGIC 2. **The two arrays.** `aadt_by_day` holds 7 values, Monday first. `aadt_by_day_hour`
-# MAGIC    holds 168, ordered by day then hour, so position `(day * 24) + hour` with Monday as
-# MAGIC    day 0. This notebook uses `element_at` and `posexplode`, which count from 1 and 0
-# MAGIC    respectively, so watch which one you are reading.
+# MAGIC    estimate.
+# MAGIC 2. **AADT comes in two arrays.** `aadt_by_day` has 7 values, starting with Monday.
+# MAGIC    `aadt_by_day_hour` has 168 values, ordered by day and then hour. Position `(day * 24) +
+# MAGIC    hour` uses Monday as day 0. This notebook uses `element_at` and `posexplode`, which
+# MAGIC    count from 1 and 0, respectively.
 
 # COMMAND ----------
 
-# The default is what Marketplace suggests when you install this listing, so accepting the
-# suggested name means this notebook runs unedited. Change the widget if you named it something
-# else. Capitalisation does not matter: Unity Catalog resolves identifiers case insensitively.
-dbutils.widgets.text("catalog", "TomTom_Traffic_Volumes", "Catalog you attached the share as")
+# The default is what Marketplace suggests when you install this listing.
+dbutils.widgets.text(
+    "catalog", "TomTom_Traffic_Volumes", "Catalog you attached the share as"
+)
 catalog = dbutils.widgets.get("catalog")
 
 try:
-    # Checked through SQL rather than `spark.catalog.databaseExists`, so the check resolves the
-    # name exactly the way every query below it will. Better to say this now than to let the
-    # first real query fail with a table-not-found several cells later.
     spark.sql(f"DESCRIBE SCHEMA {catalog}.traffic_volumes")
 except Exception as error:
     raise ValueError(
@@ -53,65 +48,53 @@ coverage = f"{catalog}.traffic_volumes.coverage"
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. What is in the share
+# MAGIC ## 1. What is in the database
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT region, vintage_year, count(*) AS segments,
                round(percentile_approx(aadt, 0.5)) AS median_aadt,
                min(aadt) AS min_aadt, max(aadt) AS max_aadt
         FROM {aadt}
         GROUP BY region, vintage_year
         ORDER BY region, vintage_year
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Coverage, before anything else
+# MAGIC ## 2. Check coverage first
 # MAGIC
-# MAGIC Coverage follows probe vehicles, so it is high on motorways and low on residential
-# MAGIC streets. This is the table that decides which road classes your analysis can honestly
-# MAGIC include.
+# MAGIC Coverage follows probe vehicles: it is high on motorways and low on residential
+# MAGIC streets. Use this table to decide which road classes to include.
 # MAGIC
-# MAGIC Note `frc_key` next to `frc`. Road class 8, meaning other roads, is written as the value
-# MAGIC 9 in the source data, and some vintages publish both 8 and 9. `frc` is the corrected
-# MAGIC code and is not unique on its own, so sum over it. `frc_key` is the key exactly as
-# MAGIC delivered, for anyone reconciling against published figures.
+# MAGIC `frc_key` is the value in the source data. Road class 8 (other roads) may appear as 8
+# MAGIC or 9. `frc` corrects this value, so group or sum by `frc`; use `frc_key` to reconcile
+# MAGIC with published figures.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT region, vintage_year, frc_key, frc, frc_label,
                round(total_length_m / 1000, 1)   AS total_km,
                round(covered_length_m / 1000, 1) AS covered_km,
                coverage_pct
         FROM {coverage}
         ORDER BY region, vintage_year, frc_key
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 3. Volume by road class
 # MAGIC
-# MAGIC The distribution is heavily skewed. A handful of motorway segments carry more traffic
-# MAGIC than thousands of local roads, so medians and percentiles describe it and means do not.
+# MAGIC Traffic is unevenly distributed. A few motorway segments carry more traffic than many
+# MAGIC local roads, so medians and percentiles are more useful than means.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT frc, count(*) AS segments,
                round(percentile_approx(aadt, 0.5)) AS median_aadt,
                round(percentile_approx(aadt, 0.9)) AS p90_aadt,
@@ -120,23 +103,19 @@ display(
         FROM {aadt}
         GROUP BY frc
         ORDER BY frc
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. The weekly shape
 # MAGIC
-# MAGIC `posexplode` turns the array into rows and keeps the position, which is what maps a
-# MAGIC slot back to a weekday.
+# MAGIC `posexplode` turns the array into rows and keeps each slot's position. This links each
+# MAGIC slot to a weekday.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT
             element_at(
                 array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
@@ -151,24 +130,21 @@ display(
         )
         GROUP BY day_index
         ORDER BY day_index
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. How concentrated is the traffic
 # MAGIC
-# MAGIC A segment carrying 20,000 vehicles evenly through the day is a different risk from one
-# MAGIC carrying 20,000 with half of them in four hours. The hourly array is what separates the
-# MAGIC two. Below, the share of weekday traffic in the morning peak, 07:00 to 09:59, and the
-# MAGIC evening peak, 16:00 to 18:59.
+# MAGIC A segment with 20,000 vehicles spread across the day is different from one with half its
+# MAGIC traffic in four hours. The hourly array shows this difference. Below, we calculate the
+# MAGIC share of weekday traffic during the morning peak (07:00 to 09:59) and evening peak
+# MAGIC (16:00 to 18:59).
 
 # COMMAND ----------
 
-spark.sql(
-    f"""
+spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW peaks AS
     WITH spread AS (
         SELECT region, vintage_year, segment_id, frc, aadt, h3_r9,
@@ -188,34 +164,27 @@ spark.sql(
             AS evening_peak_pct
     FROM spread
     GROUP BY region, vintage_year, segment_id, frc, aadt, h3_r9
-    """
-)
+    """)
 
-display(
-    spark.sql(
-        """
+display(spark.sql("""
         SELECT frc, count(*) AS segments,
                round(avg(morning_peak_pct), 1) AS avg_morning_peak_pct,
                round(avg(evening_peak_pct), 1) AS avg_evening_peak_pct
         FROM peaks GROUP BY frc ORDER BY frc
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 6. An exposure tier per segment
 # MAGIC
-# MAGIC Volume on its own is not exposure. The same AADT on a motorway and on a residential
-# MAGIC street are not comparable risks, so the tiers below are ranked inside each road class.
-# MAGIC A busy local road then reads as busy for a local road.
+# MAGIC Volume alone does not show exposure. The same AADT means different things on a motorway
+# MAGIC and a residential street. These tiers rank roads within each road class.
+# MAGIC This makes busy local roads easier to compare with other local roads.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         WITH tiered AS (
             SELECT region, vintage_year, frc, aadt,
                    ntile(5) OVER (PARTITION BY region, vintage_year, frc ORDER BY aadt)
@@ -227,27 +196,23 @@ display(
                round(percentile_approx(aadt, 0.5)) AS median_aadt,
                round(max(aadt)) AS max_aadt
         FROM tiered GROUP BY exposure_tier ORDER BY exposure_tier
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 7. Scoring a portfolio through H3
 # MAGIC
-# MAGIC `h3_r9` holds the [H3](https://h3geo.org/) cell of the segment centroid at resolution 9,
-# MAGIC about 174 m across. Put the same cell on your own addresses or journeys and the join is
-# MAGIC one string comparison, with no spatial library and no map matching.
+# MAGIC `h3_r9` holds the [H3](https://h3geo.org/) cell of each segment's center at resolution 9,
+# MAGIC about 174 m across. Add the same cell to your addresses or journeys to join them with
+# MAGIC one string comparison. No spatial library or map matching is needed.
 # MAGIC
-# MAGIC Total the volume per cell rather than averaging it. A cell holding a motorway and three
-# MAGIC side streets is a busy place, and an average hides that.
+# MAGIC Sum the volume for each cell instead of averaging it. A cell with a motorway and three
+# MAGIC side streets is busy, but an average can hide that.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         SELECT region, vintage_year, h3_r9,
                count(*)  AS segments,
                sum(aadt) AS total_aadt,
@@ -257,9 +222,7 @@ display(
         GROUP BY region, vintage_year, h3_r9
         ORDER BY total_aadt DESC
         LIMIT 25
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
@@ -285,13 +248,10 @@ from shapely import wkt
 REGION = "melbourne"
 AREA = (144.94, -37.83, 144.99, -37.80)  # west, south, east, north
 
-# Each segment becomes its own SVG path with its own tooltip, so a wide box produces an output
-# larger than a notebook will render, and a truncated map shows nothing at all. Busiest first,
-# which is also the right order to lose the tail in.
+# Each segment becomes its own SVG path with its own tooltip, so we limit the rendered segments
 MAX_SEGMENTS_ON_MAP = 1500
 
-city = spark.sql(
-    f"""
+city = spark.sql(f"""
     SELECT geometry_wkt, aadt, frc, aadt_by_day
     FROM {aadt}
     WHERE region = '{REGION}'
@@ -299,8 +259,7 @@ city = spark.sql(
       AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
     ORDER BY aadt DESC
     LIMIT {MAX_SEGMENTS_ON_MAP}
-    """
-).toPandas()
+    """).toPandas()
 
 print(f"{len(city):,} busiest segments in that box")
 
@@ -308,22 +267,14 @@ if len(city):
     chart = folium.Map(
         location=((AREA[1] + AREA[3]) / 2, (AREA[0] + AREA[2]) / 2),
         zoom_start=15,
-        # OpenStreetMap rather than one of the CartoDB styles: those now need an API key, and
-        # folium still offers them, so the map renders with a warning and no basemap.
         tiles="OpenStreetMap",
     )
-    # The default OpenStreetMap tiles carry enough colour of their own to compete with the
-    # data drawn on top. Desaturating the tile pane leaves the basemap as context and the
-    # overlay as the only colour on the map. Leaflet keeps vectors in a separate pane, so
-    # this does not touch the segments.
     chart.get_root().header.add_child(
         folium.Element(
             "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}"
             "</style>"
         )
     )
-    # Volume spans orders of magnitude, so shade on a log scale or every road but the
-    # busiest looks the same.
     shade = mcolors.LogNorm(vmin=max(city.aadt.min(), 1), vmax=city.aadt.max())
 
     for row in city.itertuples():
@@ -347,22 +298,20 @@ else:
 # MAGIC %md
 # MAGIC ## Where to go next
 # MAGIC
-# MAGIC **Join to your own network.** `osm_id` links to OpenStreetMap and `gers_id` to Overture
-# MAGIC GERS, so data already matched to either needs no further matching. `openlr` is there for
-# MAGIC when it is matched to neither.
+# MAGIC **Join to your own network.** `osm_id` links to OpenStreetMap and `gers_id` links to
+# MAGIC Overture GERS. Data matched to either needs no further matching. Use `openlr` for data
+# MAGIC matched to neither.
 # MAGIC
-# MAGIC **Combine with Traffic Stats.** Volume is exposure and speed is severity. Together they
-# MAGIC make a far better risk surface than either alone. TomTom Traffic Stats is a separate
-# MAGIC Marketplace listing covering the same London box, and both datasets carry `h3_r9`, so
-# MAGIC the two join without any map matching.
+# MAGIC **Combine with Traffic Stats.** Volume shows exposure and speed shows severity. Together
+# MAGIC they give a better risk picture. TomTom Traffic Stats is a separate Marketplace listing
+# MAGIC for the same four metropolitan areas. Both datasets have `h3_r9`, so you can join them
+# MAGIC without map matching.
 # MAGIC
-# MAGIC Because they are separate listings they arrive as separate catalogs. The query below
-# MAGIC assumes the suggested names, `TomTom_Traffic_Volumes` and `TomTom_Traffic_Stats`;
-# MAGIC substitute whatever you called them.
+# MAGIC The listings use separate catalogs. The query below uses the suggested names,
+# MAGIC `TomTom_Traffic_Volumes` and `TomTom_Traffic_Stats`. Replace them with your catalog names.
 # MAGIC
-# MAGIC Total each side to one row per cell **before** joining. Joining first multiplies every
-# MAGIC volume row by the 21 hourly rows behind each segment, and the totals come out in the
-# MAGIC billions:
+# MAGIC First total each dataset to one row per cell. If you join first, each volume row is
+# MAGIC multiplied by the 21 hourly rows for each segment. The totals can then reach the billions:
 # MAGIC
 # MAGIC ```sql
 # MAGIC WITH volume AS (
@@ -385,13 +334,12 @@ else:
 # MAGIC LIMIT 20
 # MAGIC ```
 # MAGIC
-# MAGIC A cell that is busy and slow is a different risk from one that is busy and fast. The
-# MAGIC busiest cells in central London come back at 14 to 22 km/h in the morning peak.
+# MAGIC A busy, slow cell has a different risk from a busy, fast cell. The busiest central London
+# MAGIC cells have morning peak speeds of 14 to 22 km/h.
 # MAGIC
-# MAGIC **Compare vintages.** Two years on the same segment identifiers turns growth into a
-# MAGIC subtraction. Check `coverage` for both years first, so you do not read better coverage
-# MAGIC as more traffic.
+# MAGIC **Compare vintages.** Use the same segment identifiers from two years to calculate growth.
+# MAGIC Check `coverage` for both years first. Better coverage can look like more traffic.
 # MAGIC
-# MAGIC **Remember what is not here.** Every row has an estimate, so nothing needs filtering
-# MAGIC out, but the segments with no estimate are absent rather than zero. Any statement about
-# MAGIC a whole network has to come from `coverage`, not from counting rows in this table.
+# MAGIC **Remember what is not here.** Every row has an estimate, so no filtering is needed.
+# MAGIC Segments without estimates are absent, not zero. Use `coverage` for network-wide claims,
+# MAGIC not the row count in this table.

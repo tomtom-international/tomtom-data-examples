@@ -8,9 +8,4 @@ result, and runs unedited if you accepted the catalog name the marketplace sugge
 | `traffic-stats/` | TomTom Traffic Stats | Databricks |
 | `traffic-volumes/` | TomTom Traffic Volumes | Databricks |
 
-Each notebook covers what is in the tables, how coverage varies by road class, and the fields
-whose behaviour is easy to get wrong: speeds are km/h, hours are UTC, and segments without a
-measurement are absent rather than zero.
-
-These notebooks are also attached to the Marketplace listings, so most people meet them there
-rather than here.
+Each notebook covers what is in the tables and some initial exploratory operations to give a feel of the data.
