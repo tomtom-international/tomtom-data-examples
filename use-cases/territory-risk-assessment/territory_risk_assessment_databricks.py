@@ -26,9 +26,13 @@
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
-dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
+dbutils.widgets.text(
+    "volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog"
+)
 dbutils.widgets.text("observation_date", "2025-09-03", "Date to score, UTC")
-dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
+dbutils.widgets.text(
+    "region", "london", "Region: london, austin, losangeles or melbourne"
+)
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
@@ -52,12 +56,11 @@ for schema in (stats, volumes):
 # MAGIC %md
 # MAGIC ## 1. Territory risk, per H3 cell
 # MAGIC
-# MAGIC Both datasets carry `h3_r9`, an H3 cell at resolution 9, roughly 0.1 km² and about the
-# MAGIC size of a few city blocks. That is the join: no map matching, no spatial index, one
-# MAGIC string comparison. It is also a more useful grain than a postcode, which can span a
-# MAGIC motorway and a cul-de-sac.
+# MAGIC Both datasets use `h3_r9`, an H3 cell at resolution 9. Each cell is about 0.1 km², or a
+# MAGIC few city blocks. We join on this value, so no map matching or spatial index is needed.
+# MAGIC It is more useful than a postcode, which can include both a motorway and a cul-de-sac.
 # MAGIC
-# MAGIC Five factors, four from speed and one from volume:
+# MAGIC We use five factors: four from speed and one from volume.
 # MAGIC
 # MAGIC | Factor | Source | Why it matters |
 # MAGIC |---|---|---|
@@ -67,18 +70,17 @@ for schema in (stats, volumes):
 # MAGIC | Speeding rate | speeds | p85 above the limit, so speeding is normal rather than rare |
 # MAGIC | Congestion rate | speeds | hours below 60% of the limit: dense, slow, frequent contact |
 # MAGIC
-# MAGIC Each is scaled to 0–1 across the cells in this extract, then weighted. **The weights are
-# MAGIC illustrative.** Calibrate them against your own claims history before the score means
-# MAGIC anything, and note that because the scaling is relative to this extract, scores rank
-# MAGIC cells within it and are not comparable across releases.
+# MAGIC Each factor is scaled from 0 to 1 across the cells in this extract, then weighted.
+# MAGIC **The weights are illustrative.** Calibrate them with your claims history. The scaling is
+# MAGIC relative to this extract, so scores rank cells within it and cannot be compared across
+# MAGIC releases.
 # MAGIC
-# MAGIC One date is scored by default. `hourly_stats` is partitioned by `observation_date`, so a
-# MAGIC single date reads one partition instead of the whole week.
+# MAGIC The default score uses one date. `hourly_stats` is partitioned by `observation_date`, so
+# MAGIC one date reads one partition instead of the whole week.
 
 # COMMAND ----------
 
-spark.sql(
-    f"""
+spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW territory_risk AS
     WITH severity AS (
         SELECT
@@ -132,37 +134,32 @@ spark.sql(
             + 0.10 * (c.congestion_rate - b.lo_c) / nullif(b.hi_c - b.lo_c, 0)
         , 3) AS risk_score
     FROM cells c CROSS JOIN bounds b
-    """
-)
+    """)
 
 display(spark.sql("SELECT * FROM territory_risk ORDER BY risk_score DESC LIMIT 15"))
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Read the top of that table before trusting the score
+# MAGIC ## 2. Review the top rows before trusting the score
 # MAGIC
-# MAGIC Two very different kinds of cell score highly, and a single number hides which is which:
+# MAGIC Two very different types of cell can score highly:
 # MAGIC
-# MAGIC - **Dense and slow.** Central London cells: 1.3 to 1.6 million AADT at 15 to 25 km/h.
-# MAGIC   High exposure, low severity per event, frequent low-speed contact.
-# MAGIC - **Fast and free-flowing.** Motorway cells: around 460,000 AADT at over 100 km/h with
-# MAGIC   the 85th percentile above the limit in almost every hour, and next to no congestion.
-# MAGIC   Lower exposure, far higher severity per event.
+# MAGIC - **Dense and slow.** Central London cells have 1.3 to 1.6 million AADT and speeds of 15 to
+# MAGIC   25 km/h. Exposure is high, but each event is less severe.
+# MAGIC - **Fast and free-flowing.** Motorway cells have about 460,000 AADT and speeds above 100 km/h.
+# MAGIC   Their 85th percentile is above the limit in almost every hour, with very little congestion.
+# MAGIC   Exposure is lower, but each event is more severe.
 # MAGIC
-# MAGIC A claims frequency model and a claims severity model want these weighted differently, so
-# MAGIC in practice you would score them separately rather than collapse both into one number.
-# MAGIC Keeping the component columns, as above, is what makes that possible later.
+# MAGIC Claims frequency and severity models use different weights. In practice, score these separately
+# MAGIC instead of combining them into one number. Keeping the component columns makes this possible.
 # MAGIC
-# MAGIC The breakdown below is the same split across the whole extract rather than the top of the
-# MAGIC table, and the pattern holds: motorway cells speed twice as often as urban ones and
-# MAGIC congest twenty times less.
+# MAGIC The breakdown below uses the full extract, not just the top rows. The pattern is the same:
+# MAGIC motorway cells speed twice as often as urban cells and congest twenty times less.
 
 # COMMAND ----------
 
-display(
-    spark.sql(
-        """
+display(spark.sql("""
         SELECT
             CASE WHEN mean_speed_kph >= 80 THEN 'motorway speeds'
                  WHEN mean_speed_kph >= 40 THEN 'arterial speeds'
@@ -176,22 +173,20 @@ display(
         FROM territory_risk
         GROUP BY cell_type
         ORDER BY mean_speed_kph DESC
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 3. The map
 # MAGIC
-# MAGIC Resolution 9 is the right grain to score on and the wrong grain to draw. There are
-# MAGIC 224,000 of those cells here, each about 0.1 km2, and a notebook will render a few
-# MAGIC hundred polygons before it gives up. Rolling the same scores up to resolution 6, about
-# MAGIC 36 km2, covers the whole extract in roughly 2,000 hexagons.
+# MAGIC Resolution 9 is useful for scoring but too detailed for the map. This extract has
+# MAGIC 224,000 cells at about 0.1 km2 each. The notebook can only render a few hundred
+# MAGIC polygons. Resolution 6 uses cells of about 36 km2 and covers the extract with about
+# MAGIC 2,000 hexagons.
 # MAGIC
-# MAGIC Exposure does the weighting, so a cell reads as the risk a vehicle there actually
-# MAGIC meets rather than an average that counts an empty lane the same as a motorway.
+# MAGIC Exposure weights the scores by traffic. This shows the risk vehicles actually face
+# MAGIC instead of treating an empty lane like a motorway.
 
 # COMMAND ----------
 
@@ -206,8 +201,7 @@ from h3 import cell_to_boundary, cell_to_latlng
 
 MAP_RESOLUTION = 6
 
-area = spark.sql(
-    f"""
+area = spark.sql(f"""
     SELECT h3_toparent(h3_r9, {MAP_RESOLUTION})                        AS cell,
            sum(total_aadt)                                             AS total_aadt,
            round(sum(risk_score * total_aadt) / sum(total_aadt), 3)     AS risk_score,
@@ -216,32 +210,30 @@ area = spark.sql(
            count(*)                                                     AS cells_r9
     FROM territory_risk
     GROUP BY 1
-    """
-).toPandas()
+    """).toPandas()
 
-print(f"{len(area):,} cells at resolution {MAP_RESOLUTION}, "
-      f"rolled up from {area.cells_r9.sum():,} scored cells")
+print(
+    f"{len(area):,} cells at resolution {MAP_RESOLUTION}, "
+    f"rolled up from {area.cells_r9.sum():,} scored cells"
+)
 
 centres = [cell_to_latlng(c) for c in area.cell]
 chart = folium.Map(
-    location=[sum(c[0] for c in centres) / len(centres),
-              sum(c[1] for c in centres) / len(centres)],
+    location=[
+        sum(c[0] for c in centres) / len(centres),
+        sum(c[1] for c in centres) / len(centres),
+    ],
     zoom_start=9,
-    # OpenStreetMap rather than one of the CartoDB styles: those now need an API key, and
-    # folium still offers them, so the map renders with a warning and no basemap.
     tiles="OpenStreetMap",
 )
-# The default tiles carry enough colour of their own to compete with the data drawn on top.
-# Desaturating the tile pane leaves the basemap as context and the choropleth as the only
-# colour. Leaflet keeps vectors in a separate pane, so this does not touch the hexagons.
 chart.get_root().header.add_child(
     folium.Element(
         "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
     )
 )
 
-# Shade on rank rather than on the score itself. Exposure is heavily skewed, so a linear scale
-# spends most of its colour on a handful of motorway cells and leaves everything else flat.
+# Shade by rank instead of score. Exposure is skewed, so a linear scale would leave most cells
+# with little colour.
 rank = area.risk_score.rank(pct=True)
 
 for row, shade in zip(area.itertuples(), rank):
@@ -264,32 +256,29 @@ display(chart)
 # MAGIC %md
 # MAGIC ## 4. Route risk, from a telematics trace
 # MAGIC
-# MAGIC Territory rating asks where a driver lives. Route rating asks which roads they actually
-# MAGIC drive, which is a far better question and the reason telematics exists.
+# MAGIC Territory rating asks where a driver lives. Route rating asks which roads they drive.
+# MAGIC Telematics makes this possible.
 # MAGIC
-# MAGIC Raw GPS is not enough on its own: points sit 10 to 50 metres off the road and carry no
-# MAGIC record of which road they were on. **Map matching** resolves a trace to a sequence of
-# MAGIC road segments. [Fast Map Matching](https://github.com/cyang-kth/fmm) is an open source
-# MAGIC implementation that outputs OpenStreetMap way IDs.
+# MAGIC Raw GPS is not enough. Points can be 10 to 50 metres off the road and do not identify the
+# MAGIC road. **Map matching** links the trace to road segments. [Fast Map Matching](https://github.com/cyang-kth/fmm)
+# MAGIC is an open source tool that outputs OpenStreetMap way IDs.
 # MAGIC
-# MAGIC Those IDs are the join. `segments.osm_way_ids` holds the OpenStreetMap ways each TomTom
-# MAGIC segment maps to, so matched output joins straight in with `arrays_overlap` and no second
-# MAGIC matching step:
+# MAGIC These IDs provide the join. `segments.osm_way_ids` lists the OpenStreetMap ways for each
+# MAGIC TomTom segment. The matched output joins with `arrays_overlap`, so no second matching step
+# MAGIC is needed:
 # MAGIC
 # MAGIC ```
 # MAGIC GPS trace -> map matcher -> OSM way IDs -> segments.osm_way_ids -> hourly speeds
 # MAGIC ```
 # MAGIC
-# MAGIC The example below uses two ways from the M20 motorway in Kent. In production these come
-# MAGIC from the matcher, one list per trip.
+# MAGIC The example uses two ways from the M20 motorway in Kent. In production, the matcher
+# MAGIC provides one list per trip.
 
 # COMMAND ----------
 
 MATCHED_OSM_WAYS = [4394118, 4394117]
 
-display(
-    spark.sql(
-        f"""
+display(spark.sql(f"""
         WITH on_route AS (
             SELECT s.dseg_id, s.street_name, s.speed_limit_kph, s.length_m
             FROM {stats}.segments s
@@ -322,32 +311,30 @@ display(
             round(100 * sum(length_m * speeding_rate) / sum(length_m), 1)
                                                            AS pct_speeding_by_length
         FROM per_segment
-        """
-    )
-)
+        """))
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## What this route says
 # MAGIC
-# MAGIC 137 segments, 26 km of motorway, averaging 105 km/h with the 85th percentile above the
-# MAGIC limit in 94% of hours and congestion in almost none. A commuter on this route has a
-# MAGIC low-frequency, high-severity profile, and the near-universal speeding is a property of
-# MAGIC the road rather than of any one driver.
+# MAGIC This route has 137 segments and covers 26 km of motorway. The average speed is 105 km/h.
+# MAGIC The 85th percentile is above the limit in 94% of hours, with almost no congestion. This
+# MAGIC means the route has rare but severe risk. The widespread speeding reflects the road, not
+# MAGIC any single driver.
 # MAGIC
-# MAGIC That last point matters for pricing: this is the **baseline** for the road. A driver's
-# MAGIC own telematics speeds are only informative relative to it, and a model that skips the
-# MAGIC baseline ends up charging people for the roads available to them.
+# MAGIC This matters for pricing. These results are the road's **baseline**. A driver's telematics
+# MAGIC speeds only make sense compared with this baseline. Without it, a model may charge people
+# MAGIC for the roads they use.
 # MAGIC
 # MAGIC ## Where to take it next
 # MAGIC
-# MAGIC - **Weight the route by time, not distance.** A congested kilometre carries more exposure
-# MAGIC   than a free-flowing one. `aadt_by_day_hour` gives the hourly shape to weight by.
-# MAGIC - **Score frequency and severity separately.** They want opposite things from these
-# MAGIC   factors, as section 2 shows.
-# MAGIC - **Check coverage before generalising.** `traffic_volumes.coverage` gives the share of
-# MAGIC   each road class with an estimate, and segments without one are absent rather than zero.
-# MAGIC   On minor roads much of the network has none.
-# MAGIC - **Split weekdays from weekends.** `observation_date` gives the day of week, and the two
-# MAGIC   patterns differ enough that pooling them hides both.
+# MAGIC - **Weight the route by time, not distance.** A congested kilometre has more exposure than
+# MAGIC   a clear one. Use `aadt_by_day_hour` to apply hourly weights.
+# MAGIC - **Score frequency and severity separately.** Section 2 shows why these factors need
+# MAGIC   separate scores.
+# MAGIC - **Check coverage first.** `traffic_volumes.coverage` shows the share of each road class
+# MAGIC   with an estimate. Segments without an estimate are missing, not zero. Many minor roads
+# MAGIC   have no estimate.
+# MAGIC - **Separate weekdays and weekends.** `observation_date` shows the day of week. Combining
+# MAGIC   the two patterns can hide important differences.

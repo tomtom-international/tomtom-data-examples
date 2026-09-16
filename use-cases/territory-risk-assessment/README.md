@@ -1,34 +1,27 @@
 # Territory risk assessment
 
-Rating geographic areas, and individual routes, for road risk from traffic speed and volume.
+Rating geographic areas, and individual routes, for road risk from traffic speed and volume
 
-**Data needed:** TomTom Traffic Stats and TomTom Traffic Volumes, both attached. They cover the
-same four metropolitan areas; the `region` widget picks one, and London is the default.
 
 ## The question
 
-Motor insurers price territory. The usual unit is a postcode, which can contain both a motorway
-and a cul-de-sac, so the rating is an average over roads that behave nothing like each other.
+Motor insurers rate areas. They usually use postcodes, but a postcode can include both a motorway
+and a cul-de-sac. This means the rating averages roads with very different conditions.
 
-Two ingredients make a better one. **Volume** is exposure: how many vehicles are there to collide
-with. **Speed** is severity and behaviour: how fast, how erratic, how often above the limit.
-Neither alone is a risk model.
+Two factors make this rating better. **Volume** measures exposure: how many vehicles could be involved
+in a collision. **Speed** measures severity and behaviour: how fast and erratically vehicles travel,
+and how often they exceed the limit. Neither factor alone gives a complete risk model.
 
 ## The approach
 
-**Territory score.** Both datasets carry an H3 cell at resolution 9, roughly 0.1 km², so they
-join on one string comparison with no map matching. Five factors are scaled across the extract
-and weighted: total AADT for exposure, then mean speed, variability, speeding rate and congestion
-rate from the hourly speeds. The weights are illustrative and want calibrating against claims
-history.
+**Territory score.** Both datasets use H3 resolution 9 cells. Each cell covers about 0.1 km². We
+scale and combine five factors: total AADT, average speed, speed changes, speeding rate, and congestion. The weights are examples and should be tested against claims history.
 
-**Route score.** `segments.osm_way_ids` holds the OpenStreetMap ways each segment maps to, so the
-output of a map matcher such as [Fast Map Matching](https://github.com/cyang-kth/fmm) joins
-straight in and a telematics trace can be scored against the roads it actually used.
+**Route score.** `segments.osm_way_ids` lists the OpenStreetMap ways for each segment. A map matcher such as [Fast Map Matching](https://github.com/cyang-kth/fmm) can use this output directly. This lets us score a telematics trace against the roads it used.
 
 ## What the numbers come out as
 
-Two kinds of cell score highly, for opposite reasons:
+Two types of cells score highly, for different reasons:
 
 | | Mean AADT | Mean speed | Hours speeding | Hours congested |
 |---|---|---|---|---|
@@ -36,20 +29,17 @@ Two kinds of cell score highly, for opposite reasons:
 | Arterial speeds | 20,000 | 55.4 km/h | 28.2% | 33.0% |
 | Urban speeds | 47,100 | 29.2 km/h | 26.4% | 52.3% |
 
-The highest scoring cells are central London at 1.3 to 1.6 million AADT and 15 to 25 km/h, with
-motorway cells close behind at around 460,000 AADT and over 100 km/h.
-
-The example route, 26 km of the M20 motorway, averages 105 km/h with the 85th percentile above
-the limit in 94% of hours and congestion in almost none. Near-universal speeding on a road like
-that is a property of the road, which is what makes it a baseline to measure a driver against.
+The example route covers 26 km of the M20 motorway. It averages 105 km/h, with the 85th percentile
+above the limit in 94% of hours and almost no congestion. Frequent speeding on this road is a road
+feature. It provides a baseline for measuring drivers.
 
 ## Caveats that change the answer
 
-- Scores are scaled within this extract, so they rank cells against each other and are not
-  comparable across releases.
-- Claims frequency and claims severity want these factors weighted differently. Scoring them
-  separately is usually better than one combined number.
-- `traffic_volumes.coverage` gives the share of each road class with an estimate. Segments without
-  one are absent rather than zero, so read it before generalising to a whole network.
-- One date is scored by default. Weekday and weekend patterns differ enough that pooling them
-  hides both.
+- Scores are scaled within this extract. They rank cells against each other but cannot be
+  compared with other areas.
+- Claims frequency and severity need different weights. Separate scores are usually better than
+  one combined score.
+- `traffic_volumes.coverage` shows the share of each road class with an estimate. Segments without
+  an estimate are absent, not zero. Check this before applying the results to a whole network.
+- The default score uses one date. Weekday and weekend patterns differ, so combining them hides
+  important details.
