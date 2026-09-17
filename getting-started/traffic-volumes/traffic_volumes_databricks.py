@@ -6,10 +6,49 @@
 # MAGIC every day of the week. Where Traffic Stats tells you how fast traffic moved, this tells
 # MAGIC you how much of it there was, which is the exposure term in most road risk models.
 # MAGIC
-# MAGIC | Table | One row per | Carries |
-# MAGIC |---|---|---|
-# MAGIC | `traffic_volumes.aadt_segments` | segment and vintage | AADT, its weekly and hourly profile, geometry, identifiers |
-# MAGIC | `traffic_volumes.coverage` | region, vintage and road class | how much of the network has an estimate |
+# MAGIC ## Database tables
+# MAGIC
+# MAGIC | Table | Purpose |
+# MAGIC |---|---|
+# MAGIC | `traffic_volumes.aadt_segments` | Annual Average Daily Traffic estimate and weekly profile for a road segment. |
+# MAGIC | `traffic_volumes.coverage` | Network coverage by region, vintage, and road class. |
+# MAGIC
+# MAGIC ### `aadt_segments` columns
+# MAGIC
+# MAGIC | Column | Description |
+# MAGIC |---|---|
+# MAGIC | `region` | Metropolitan sample extract. |
+# MAGIC | `vintage_year` | Year of the AADT estimate. |
+# MAGIC | `segment_id` | TomTom segment ID, unique within a region and vintage. |
+# MAGIC | `frc` | Corrected Functional Road Class: 0 is motorway and 8 is other roads. |
+# MAGIC | `frc_delivered` | Functional Road Class exactly as delivered, including 9 where supplied. |
+# MAGIC | `openlr` | OpenLR location reference. |
+# MAGIC | `osm_id` | Matching OpenStreetMap way ID. |
+# MAGIC | `gers_id` | Matching Overture GERS identifier. |
+# MAGIC | `aadt` | Annual Average Daily Traffic estimate, in vehicles. |
+# MAGIC | `aadt_by_day` | Seven daily AADT values, ordered Monday through Sunday. |
+# MAGIC | `aadt_by_day_hour` | 168 hourly AADT values, ordered Monday 00:00 through Sunday 23:00. |
+# MAGIC | `geometry_wkt` | Segment geometry as a WGS84 WKT LineString. |
+# MAGIC | `min_lon` | West edge of the segment bounding box. |
+# MAGIC | `min_lat` | South edge of the segment bounding box. |
+# MAGIC | `max_lon` | East edge of the segment bounding box. |
+# MAGIC | `max_lat` | North edge of the segment bounding box. |
+# MAGIC | `h3_r9` | H3 cell containing the segment centre, at resolution 9. |
+# MAGIC | `source_file` | Source file that supplied the row. |
+# MAGIC
+# MAGIC ### `coverage` columns
+# MAGIC
+# MAGIC | Column | Description |
+# MAGIC |---|---|
+# MAGIC | `region` | Metropolitan sample extract. |
+# MAGIC | `vintage_year` | Year of the AADT estimate. |
+# MAGIC | `frc_key` | Road-class key exactly as delivered, such as `FRC0`. |
+# MAGIC | `frc` | Corrected Functional Road Class from 0 to 8. |
+# MAGIC | `frc_label` | Human-readable road-class name. |
+# MAGIC | `total_length_m` | Total network length in the road class, in metres. |
+# MAGIC | `covered_length_m` | Length with an AADT estimate, in metres. |
+# MAGIC | `coverage_pct` | Percentage of the road class with an AADT estimate. |
+# MAGIC | `source_file` | Source file name. |
 # MAGIC
 # MAGIC **TomTom Traffic Stats** is a separate listing holding hourly speeds for the same
 # MAGIC roads. Take it too and volume and speed can be read together; the last section here

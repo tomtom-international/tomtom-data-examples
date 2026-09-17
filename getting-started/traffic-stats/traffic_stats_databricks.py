@@ -4,12 +4,59 @@
 # MAGIC
 # MAGIC  Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles.
 # MAGIC
-# MAGIC | Table | One row per | Carries |
-# MAGIC |---|---|---|
-# MAGIC | `traffic_stats_batch.segments` | directional road segment | road class, speed limit, geometry, time zone |
-# MAGIC | `traffic_stats_batch.hourly_stats` | segment, date and hour | mean, harmonic mean, median, standard deviation and 19 speed percentiles |
+# MAGIC ## Database tables
 # MAGIC
-# MAGIC They join on `dseg_id`.
+# MAGIC | Table | Purpose |
+# MAGIC |---|---|
+# MAGIC | `traffic_stats_batch.segments` | One directional road segment and its map, road, and location attributes. |
+# MAGIC | `traffic_stats_batch.hourly_stats` | One segment's speed measurements for one UTC date and hour. Join to `segments` on `dseg_id`. |
+# MAGIC
+# MAGIC ### `segments` columns
+# MAGIC
+# MAGIC | Column | Description |
+# MAGIC |---|---|
+# MAGIC | `dseg_id` | Directional segment ID; join key to `hourly_stats`. |
+# MAGIC | `segment_id` | Legacy segment ID used before 2023. |
+# MAGIC | `new_segment_id` | Current segment identifier as text. |
+# MAGIC | `frc` | Functional Road Class: 0 is motorway and 7 is a local road. |
+# MAGIC | `speed_limit_kph` | Posted speed limit in km/h. |
+# MAGIC | `has_verified_speed` | Whether the speed limit has been field verified. |
+# MAGIC | `street_name` | Road name; may be null. |
+# MAGIC | `length_m` | Segment length in metres. |
+# MAGIC | `form_of_way` | Physical road form, such as a single carriageway or roundabout. |
+# MAGIC | `has_hov_lane` | Whether a high-occupancy-vehicle lane is present. |
+# MAGIC | `bearing_deg` | Direction of travel in degrees. |
+# MAGIC | `is_navigable` | Whether through traffic can use the segment. |
+# MAGIC | `is_under_construction` | Whether the segment is under construction. |
+# MAGIC | `has_restricted_access` | Whether access is private or restricted. |
+# MAGIC | `geometry_wkt` | Segment geometry as a WGS84 WKT LineString. |
+# MAGIC | `min_lon` | West edge of the segment bounding box. |
+# MAGIC | `min_lat` | South edge of the segment bounding box. |
+# MAGIC | `max_lon` | East edge of the segment bounding box. |
+# MAGIC | `max_lat` | North edge of the segment bounding box. |
+# MAGIC | `h3_r9` | H3 cell containing the segment centre, at resolution 9. |
+# MAGIC | `time_zone` | IANA time zone used to convert UTC measurements to local time. |
+# MAGIC | `country_iso3` | Three-letter ISO country code. |
+# MAGIC | `osm_way_ids` | Matching OpenStreetMap way IDs. |
+# MAGIC | `osm_offsets` | Offsets locating the segment within the matching OSM ways. |
+# MAGIC | `region` | Metropolitan sample extract. |
+# MAGIC | `tile_id` | Morton tile identifier. |
+# MAGIC | `map_version` | TomTom map version. |
+# MAGIC
+# MAGIC ### `hourly_stats` columns
+# MAGIC
+# MAGIC | Column | Description |
+# MAGIC |---|---|
+# MAGIC | `dseg_id` | Directional segment ID; join key to `segments`. |
+# MAGIC | `observation_date` | UTC measurement date. |
+# MAGIC | `hour_utc` | UTC hour from 0 to 23. |
+# MAGIC | `avg_speed_kph` | Arithmetic mean speed in km/h. |
+# MAGIC | `harmonic_speed_kph` | Harmonic mean speed in km/h; use for travel-time analysis. |
+# MAGIC | `median_speed_kph` | Median speed in km/h. |
+# MAGIC | `stddev_speed_kph` | Standard deviation of speed in km/h. |
+# MAGIC | `speed_percentiles_kph` | Nineteen speed percentiles from p5 to p95; may be null when coverage is low. |
+# MAGIC | `tile_id` | Morton tile identifier. |
+# MAGIC | `map_version` | TomTom map version. |
 # MAGIC
 # MAGIC **TomTom Traffic Volumes** is a separate listing holding how much traffic each road carries, rather than how fast it moves.
 # MAGIC Take it too and volume and speed can be read together; the last section here
