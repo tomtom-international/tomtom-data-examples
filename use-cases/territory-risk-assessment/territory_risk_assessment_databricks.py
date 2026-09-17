@@ -21,7 +21,9 @@
 # MAGIC - **TomTom Traffic Stats** — hourly speeds per road segment
 # MAGIC - **TomTom Traffic Volumes** — annual average daily traffic per road segment
 # MAGIC
-# MAGIC They cover the same four metropolitan areas. The `region` widget below picks one.
+# MAGIC They cover the same four metropolitan areas. The `region` widget below picks one. Each
+# MAGIC region is an extract far wider than the city: `london` runs from the Dorset coast to the
+# MAGIC Peak District and takes in Birmingham, Bristol and Southampton.
 
 # COMMAND ----------
 
@@ -64,7 +66,7 @@ for schema in (stats, volumes):
 # MAGIC
 # MAGIC | Factor | Source | Why it matters |
 # MAGIC |---|---|---|
-# MAGIC | Total AADT | volumes | exposure. More vehicles, more opportunities for contact |
+# MAGIC | Vehicle-km per day | volumes | exposure. `aadt` times `length_m`, so a road drawn as ten segments counts once |
 # MAGIC | Mean speed | speeds | severity. Energy in a collision goes with the square of speed |
 # MAGIC | Variability | speeds | stop-and-go traffic, the pattern behind rear-end collisions |
 # MAGIC | Speeding rate | speeds | p85 above the limit, so speeding is normal rather than rare |
@@ -74,6 +76,10 @@ for schema in (stats, volumes):
 # MAGIC **The weights are illustrative.** Calibrate them with your claims history. The scaling is
 # MAGIC relative to this extract, so scores rank cells within it and cannot be compared across
 # MAGIC releases.
+# MAGIC
+# MAGIC Hours with a single observation carry no percentile array. They count towards mean speed
+# MAGIC and congestion; the speeding rate is taken over the hours that have a distribution, and
+# MAGIC `single_observation_pct` is kept beside the score as a measure of how thin the evidence is.
 # MAGIC
 # MAGIC The default score uses one date. `hourly_stats` is partitioned by `observation_date`, so
 # MAGIC one date reads one partition instead of the whole week.
@@ -87,32 +93,35 @@ spark.sql(f"""
             s.h3_r9,
             avg(h.harmonic_speed_kph)                          AS mean_speed_kph,
             avg(h.stddev_speed_kph / h.harmonic_speed_kph)     AS variability,
-            avg(CASE WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
+            avg(CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
+                     WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
                      THEN 1.0 ELSE 0.0 END)                    AS speeding_rate,
             avg(CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph
-                     THEN 1.0 ELSE 0.0 END)                    AS congestion_rate
+                     THEN 1.0 ELSE 0.0 END)                    AS congestion_rate,
+            avg(CASE WHEN h.speed_percentiles_kph IS NULL
+                     THEN 1.0 ELSE 0.0 END)                    AS single_observation_rate
         FROM {stats}.segments s
         JOIN {stats}.hourly_stats h USING (dseg_id)
         WHERE h.observation_date = DATE '{observation_date}'
           AND s.region = '{region}'
           AND s.speed_limit_kph > 0
           AND h.harmonic_speed_kph > 0
-          AND h.speed_percentiles_kph IS NOT NULL
         GROUP BY s.h3_r9
+        HAVING count(h.speed_percentiles_kph) > 0
     ),
     exposure AS (
-        SELECT h3_r9, sum(aadt) AS total_aadt
+        SELECT h3_r9, round(sum(aadt * length_m) / 1000) AS vehicle_km_per_day
         FROM {volumes}.aadt_segments
         WHERE region = '{region}' AND vintage_year = {vintage_year}
         GROUP BY h3_r9
     ),
     cells AS (
-        SELECT e.h3_r9, e.total_aadt, v.mean_speed_kph, v.variability,
-               v.speeding_rate, v.congestion_rate
+        SELECT e.h3_r9, e.vehicle_km_per_day, v.mean_speed_kph, v.variability,
+               v.speeding_rate, v.congestion_rate, v.single_observation_rate
         FROM exposure e JOIN severity v USING (h3_r9)
     ),
     bounds AS (
-        SELECT min(total_aadt) lo_e, max(total_aadt) hi_e,
+        SELECT min(vehicle_km_per_day) lo_e, max(vehicle_km_per_day) hi_e,
                min(mean_speed_kph) lo_s, max(mean_speed_kph) hi_s,
                min(variability) lo_v, max(variability) hi_v,
                min(speeding_rate) lo_p, max(speeding_rate) hi_p,
@@ -121,13 +130,14 @@ spark.sql(f"""
     )
     SELECT
         c.h3_r9,
-        c.total_aadt,
-        round(c.mean_speed_kph, 1)        AS mean_speed_kph,
-        round(c.variability, 3)           AS variability,
-        round(100 * c.speeding_rate, 1)   AS speeding_pct,
-        round(100 * c.congestion_rate, 1) AS congestion_pct,
+        c.vehicle_km_per_day,
+        round(c.mean_speed_kph, 1)                AS mean_speed_kph,
+        round(c.variability, 3)                   AS variability,
+        round(100 * c.speeding_rate, 1)           AS speeding_pct,
+        round(100 * c.congestion_rate, 1)         AS congestion_pct,
+        round(100 * c.single_observation_rate, 1) AS single_observation_pct,
         round(
-              0.35 * (c.total_aadt      - b.lo_e) / nullif(b.hi_e - b.lo_e, 0)
+              0.35 * (c.vehicle_km_per_day - b.lo_e) / nullif(b.hi_e - b.lo_e, 0)
             + 0.20 * (c.mean_speed_kph  - b.lo_s) / nullif(b.hi_s - b.lo_s, 0)
             + 0.20 * (c.variability     - b.lo_v) / nullif(b.hi_v - b.lo_v, 0)
             + 0.15 * (c.speeding_rate   - b.lo_p) / nullif(b.hi_p - b.lo_p, 0)
@@ -145,11 +155,11 @@ display(spark.sql("SELECT * FROM territory_risk ORDER BY risk_score DESC LIMIT 1
 # MAGIC
 # MAGIC Two very different types of cell can score highly:
 # MAGIC
-# MAGIC - **Dense and slow.** Central London cells have 1.3 to 1.6 million AADT and speeds of 15 to
-# MAGIC   25 km/h. Exposure is high, but each event is less severe.
-# MAGIC - **Fast and free-flowing.** Motorway cells have about 460,000 AADT and speeds above 100 km/h.
-# MAGIC   Their 85th percentile is above the limit in almost every hour, with very little congestion.
-# MAGIC   Exposure is lower, but each event is more severe.
+# MAGIC - **Dense and slow.** Central London cells carry the most vehicle-kilometres at speeds of
+# MAGIC   15 to 25 km/h. Exposure is high, but each event is less severe.
+# MAGIC - **Fast and free-flowing.** Motorway cells run above 100 km/h. Their 85th percentile is
+# MAGIC   above the limit in almost every hour, with very little congestion. Exposure per cell is
+# MAGIC   lower, but each event is more severe.
 # MAGIC
 # MAGIC Claims frequency and severity models use different weights. In practice, score these separately
 # MAGIC instead of combining them into one number. Keeping the component columns makes this possible.
@@ -165,10 +175,11 @@ display(spark.sql("""
                  WHEN mean_speed_kph >= 40 THEN 'arterial speeds'
                  ELSE 'urban speeds' END          AS cell_type,
             count(*)                              AS cells,
-            round(avg(total_aadt))                AS mean_aadt,
+            round(avg(vehicle_km_per_day))        AS mean_vehicle_km_per_day,
             round(avg(mean_speed_kph), 1)         AS mean_speed_kph,
             round(avg(speeding_pct), 1)           AS mean_speeding_pct,
             round(avg(congestion_pct), 1)         AS mean_congestion_pct,
+            round(avg(single_observation_pct), 1) AS mean_single_observation_pct,
             round(avg(risk_score), 3)             AS mean_risk_score
         FROM territory_risk
         GROUP BY cell_type
@@ -190,7 +201,7 @@ display(spark.sql("""
 
 # COMMAND ----------
 
-# MAGIC %pip install folium h3
+# MAGIC %pip install folium==0.20.0 h3==4.5.0
 
 # COMMAND ----------
 
@@ -202,12 +213,12 @@ from h3 import cell_to_boundary, cell_to_latlng
 MAP_RESOLUTION = 6
 
 area = spark.sql(f"""
-    SELECT h3_toparent(h3_r9, {MAP_RESOLUTION})                        AS cell,
-           sum(total_aadt)                                             AS total_aadt,
-           round(sum(risk_score * total_aadt) / sum(total_aadt), 3)     AS risk_score,
-           round(sum(mean_speed_kph * total_aadt) / sum(total_aadt), 1) AS mean_speed_kph,
-           round(sum(speeding_pct * total_aadt) / sum(total_aadt), 1)   AS speeding_pct,
-           count(*)                                                     AS cells_r9
+    SELECT h3_toparent(h3_r9, {MAP_RESOLUTION})                                        AS cell,
+           sum(vehicle_km_per_day)                                                     AS vehicle_km_per_day,
+           round(sum(risk_score * vehicle_km_per_day) / sum(vehicle_km_per_day), 3)     AS risk_score,
+           round(sum(mean_speed_kph * vehicle_km_per_day) / sum(vehicle_km_per_day), 1) AS mean_speed_kph,
+           round(sum(speeding_pct * vehicle_km_per_day) / sum(vehicle_km_per_day), 1)   AS speeding_pct,
+           count(*)                                                                     AS cells_r9
     FROM territory_risk
     GROUP BY 1
     """).toPandas()
@@ -244,7 +255,7 @@ for row, shade in zip(area.itertuples(), rank):
         fill_color=mcolors.to_hex(cm.YlOrRd(shade)),
         fill_opacity=0.55,
         tooltip=(
-            f"score {row.risk_score:.2f}, {row.total_aadt:,} AADT, "
+            f"score {row.risk_score:.2f}, {row.vehicle_km_per_day:,.0f} vehicle-km/day, "
             f"{row.mean_speed_kph:.0f} km/h, speeding in {row.speeding_pct:.0f}% of hours"
         ),
     ).add_to(chart)
@@ -291,16 +302,19 @@ display(spark.sql(f"""
                 r.dseg_id,
                 any_value(r.length_m)     AS length_m,
                 avg(h.harmonic_speed_kph) AS mean_speed_kph,
-                avg(CASE WHEN element_at(h.speed_percentiles_kph, 17) > r.speed_limit_kph
+                avg(CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
+                         WHEN element_at(h.speed_percentiles_kph, 17) > r.speed_limit_kph
                          THEN 1.0 ELSE 0.0 END) AS speeding_rate,
                 avg(CASE WHEN h.harmonic_speed_kph < 0.6 * r.speed_limit_kph
-                         THEN 1.0 ELSE 0.0 END) AS congestion_rate
+                         THEN 1.0 ELSE 0.0 END) AS congestion_rate,
+                avg(CASE WHEN h.speed_percentiles_kph IS NULL
+                         THEN 1.0 ELSE 0.0 END) AS single_observation_rate
             FROM on_route r
             JOIN {stats}.hourly_stats h USING (dseg_id)
             WHERE h.observation_date = DATE '{observation_date}'
-              AND h.speed_percentiles_kph IS NOT NULL
               AND h.harmonic_speed_kph > 0
             GROUP BY r.dseg_id
+            HAVING count(h.speed_percentiles_kph) > 0
         )
         SELECT
             count(*)                                       AS segments_on_route,
@@ -308,6 +322,7 @@ display(spark.sql(f"""
             round(avg(mean_speed_kph), 1)                  AS mean_speed_kph,
             round(100 * avg(speeding_rate), 1)             AS pct_hours_speeding,
             round(100 * avg(congestion_rate), 1)           AS pct_hours_congested,
+            round(100 * avg(single_observation_rate), 1)   AS pct_hours_single_observation,
             round(100 * sum(length_m * speeding_rate) / sum(length_m), 1)
                                                            AS pct_speeding_by_length
         FROM per_segment
@@ -331,6 +346,10 @@ display(spark.sql(f"""
 # MAGIC
 # MAGIC - **Weight the route by time, not distance.** A congested kilometre has more exposure than
 # MAGIC   a clear one. Use `aadt_by_day_hour` to apply hourly weights.
+# MAGIC - **Join the two datasets on OpenStreetMap as well as H3.** `segments.osm_way_ids` is an
+# MAGIC   array; in Traffic Volumes the way IDs sit inside `osm_id` as `way:length:offset` triples,
+# MAGIC   so `cast(split(triple, ':')[0] AS BIGINT)` after `explode(split(osm_id, ','))` gives the
+# MAGIC   same key.
 # MAGIC - **Score frequency and severity separately.** Section 2 shows why these factors need
 # MAGIC   separate scores.
 # MAGIC - **Check coverage first.** `traffic_volumes.coverage` shows the share of each road class

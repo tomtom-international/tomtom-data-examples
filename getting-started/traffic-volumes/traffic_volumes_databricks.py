@@ -20,11 +20,11 @@
 # MAGIC | `region` | Metropolitan sample extract. |
 # MAGIC | `vintage_year` | Year of the AADT estimate. |
 # MAGIC | `segment_id` | TomTom segment ID, unique within a region and vintage. |
-# MAGIC | `frc` | Corrected Functional Road Class: 0 is motorway and 8 is other roads. |
-# MAGIC | `frc_delivered` | Functional Road Class exactly as delivered, including 9 where supplied. |
-# MAGIC | `openlr` | OpenLR location reference. |
-# MAGIC | `osm_id` | Matching OpenStreetMap way ID. |
-# MAGIC | `gers_id` | Matching Overture GERS identifier. |
+# MAGIC | `frc` | Functional Road Class: 0 is motorway and 7 is a minor local road. The deliveries carry 0 to 4, 6 and 7. |
+# MAGIC | `frc_delivered` | Functional Road Class exactly as delivered. |
+# MAGIC | `openlr` | OpenLR location reference, for any map with an OpenLR decoder. |
+# MAGIC | `osm_id` | OpenStreetMap ways the segment lies on, as `way:length:offset` triples separated by commas. The first field is the OSM way ID. Null where no way matched. |
+# MAGIC | `gers_id` | Overture GERS segment the road element lies on, as `id:start:end`. |
 # MAGIC | `aadt` | Annual Average Daily Traffic estimate, in vehicles. |
 # MAGIC | `aadt_by_day` | Seven daily AADT values, ordered Monday through Sunday. |
 # MAGIC | `aadt_by_day_hour` | 168 hourly AADT values, ordered Monday 00:00 through Sunday 23:00. |
@@ -34,6 +34,7 @@
 # MAGIC | `max_lon` | East edge of the segment bounding box. |
 # MAGIC | `max_lat` | North edge of the segment bounding box. |
 # MAGIC | `h3_r9` | H3 cell containing the segment centre, at resolution 9. |
+# MAGIC | `length_m` | Segment length in metres. |
 # MAGIC | `source_file` | Source file that supplied the row. |
 # MAGIC
 # MAGIC ### `coverage` columns
@@ -43,7 +44,7 @@
 # MAGIC | `region` | Metropolitan sample extract. |
 # MAGIC | `vintage_year` | Year of the AADT estimate. |
 # MAGIC | `frc_key` | Road-class key exactly as delivered, such as `FRC0`. |
-# MAGIC | `frc` | Corrected Functional Road Class from 0 to 8. |
+# MAGIC | `frc` | Functional Road Class from 0 to 8, with a delivered 9 stored as 8. |
 # MAGIC | `frc_label` | Human-readable road-class name. |
 # MAGIC | `total_length_m` | Total network length in the road class, in metres. |
 # MAGIC | `covered_length_m` | Length with an AADT estimate, in metres. |
@@ -54,7 +55,7 @@
 # MAGIC roads. Take it too and volume and speed can be read together; the last section here
 # MAGIC joins them.
 # MAGIC
-# MAGIC Two things to know before you start.
+# MAGIC Four things to know before you start.
 # MAGIC
 # MAGIC 1. **Read `coverage` first.** This table holds only the segments that have an
 # MAGIC    estimate.
@@ -62,6 +63,11 @@
 # MAGIC    `aadt_by_day_hour` has 168 values, ordered by day and then hour. Position `(day * 24) +
 # MAGIC    hour` uses Monday as day 0. This notebook uses `element_at` and `posexplode`, which
 # MAGIC    count from 1 and 0, respectively.
+# MAGIC 3. **Regions are metropolitan extracts far wider than the city.** `london` runs from the
+# MAGIC    Dorset coast to the Peak District and includes Birmingham, Bristol and Southampton;
+# MAGIC    `melbourne` covers most of Victoria. Section 1 prints each extent.
+# MAGIC 4. **Exposure is `aadt` times `length_m`.** Vehicle-kilometres do not change when a road
+# MAGIC    is drawn as one segment or ten, so sum that rather than `aadt` when comparing areas.
 
 # COMMAND ----------
 
@@ -93,8 +99,11 @@ coverage = f"{catalog}.traffic_volumes.coverage"
 
 display(spark.sql(f"""
         SELECT region, vintage_year, count(*) AS segments,
+               round(sum(length_m) / 1000) AS network_km,
                round(percentile_approx(aadt, 0.5)) AS median_aadt,
-               min(aadt) AS min_aadt, max(aadt) AS max_aadt
+               min(aadt) AS min_aadt, max(aadt) AS max_aadt,
+               min(min_lat) AS south, max(max_lat) AS north,
+               min(min_lon) AS west, max(max_lon) AS east
         FROM {aadt}
         GROUP BY region, vintage_year
         ORDER BY region, vintage_year
@@ -108,9 +117,9 @@ display(spark.sql(f"""
 # MAGIC Coverage follows probe vehicles: it is high on motorways and low on residential
 # MAGIC streets. Use this table to decide which road classes to include.
 # MAGIC
-# MAGIC `frc_key` is the value in the source data. Road class 8 (other roads) may appear as 8
-# MAGIC or 9. `frc` corrects this value, so group or sum by `frc`; use `frc_key` to reconcile
-# MAGIC with published figures.
+# MAGIC `frc_key` is the value in the source data. The coverage files report buckets `FRC8` and
+# MAGIC `FRC9` with network length and no covered length, and no segment carries either value.
+# MAGIC Group or sum by `frc`; use `frc_key` to reconcile with published figures.
 
 # COMMAND ----------
 
@@ -246,20 +255,22 @@ display(spark.sql(f"""
 # MAGIC about 174 m across. Add the same cell to your addresses or journeys to join them with
 # MAGIC one string comparison. No spatial library or map matching is needed.
 # MAGIC
-# MAGIC Sum the volume for each cell instead of averaging it. A cell with a motorway and three
-# MAGIC side streets is busy, but an average can hide that.
+# MAGIC Score each cell by **vehicle-kilometres per day**: `aadt` times `length_m`, summed. A
+# MAGIC cell with a motorway and three side streets is busy, and an average hides that. The sum
+# MAGIC is the same whether a road is drawn as one segment or ten.
 
 # COMMAND ----------
 
 display(spark.sql(f"""
         SELECT region, vintage_year, h3_r9,
-               count(*)  AS segments,
-               sum(aadt) AS total_aadt,
-               max(aadt) AS busiest_segment_aadt,
-               min(frc)  AS most_major_road_class
+               count(*)                                AS segments,
+               round(sum(aadt * length_m) / 1000)      AS vehicle_km_per_day,
+               round(sum(length_m) / 1000, 2)          AS network_km,
+               max(aadt)                               AS busiest_segment_aadt,
+               min(frc)                                AS most_major_road_class
         FROM {aadt}
         GROUP BY region, vintage_year, h3_r9
-        ORDER BY total_aadt DESC
+        ORDER BY vehicle_km_per_day DESC
         LIMIT 25
         """))
 
@@ -274,7 +285,7 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-# MAGIC %pip install folium shapely
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2
 
 # COMMAND ----------
 
@@ -337,9 +348,26 @@ else:
 # MAGIC %md
 # MAGIC ## Where to go next
 # MAGIC
-# MAGIC **Join to your own network.** `osm_id` links to OpenStreetMap and `gers_id` links to
-# MAGIC Overture GERS. Data matched to either needs no further matching. Use `openlr` for data
-# MAGIC matched to neither.
+# MAGIC **Join to your own network.** Four identifiers, one per situation:
+# MAGIC
+# MAGIC | You have | Join on |
+# MAGIC |---|---|
+# MAGIC | Other TomTom products, or another vintage of this one | `segment_id` |
+# MAGIC | Data referenced to OpenStreetMap, such as map-matched GPS traces | the way ID inside `osm_id` |
+# MAGIC | Data from another vendor referenced to Overture | the segment ID inside `gers_id` |
+# MAGIC | Your own map and an OpenLR decoder | `openlr` |
+# MAGIC
+# MAGIC `osm_id` holds one `way:length:offset` triple per OpenStreetMap way the segment lies on,
+# MAGIC separated by commas. One row per way, with the way ID as a number:
+# MAGIC
+# MAGIC ```sql
+# MAGIC SELECT segment_id, cast(split(triple, ':')[0] AS BIGINT) AS osm_way_id
+# MAGIC FROM TomTom_Traffic_Volumes.traffic_volumes.aadt_segments
+# MAGIC LATERAL VIEW explode(split(osm_id, ',')) t AS triple
+# MAGIC WHERE osm_id IS NOT NULL
+# MAGIC ```
+# MAGIC
+# MAGIC `gers_id` is `id:start:end`; `split(gers_id, ':')[0]` is the Overture segment ID.
 # MAGIC
 # MAGIC **Combine with Traffic Stats.** Volume shows exposure and speed shows severity. Together
 # MAGIC they give a better risk picture. TomTom Traffic Stats is a separate Marketplace listing
@@ -354,7 +382,7 @@ else:
 # MAGIC
 # MAGIC ```sql
 # MAGIC WITH volume AS (
-# MAGIC   SELECT h3_r9, sum(aadt) AS total_aadt
+# MAGIC   SELECT h3_r9, round(sum(aadt * length_m) / 1000) AS vehicle_km_per_day
 # MAGIC   FROM TomTom_Traffic_Volumes.traffic_volumes.aadt_segments
 # MAGIC   WHERE region = 'london' AND vintage_year = 2025
 # MAGIC   GROUP BY h3_r9
@@ -367,9 +395,9 @@ else:
 # MAGIC     AND h.hour_utc BETWEEN 7 AND 9
 # MAGIC   GROUP BY s.h3_r9
 # MAGIC )
-# MAGIC SELECT v.h3_r9, v.total_aadt, round(s.peak_speed_kph) AS peak_speed_kph
+# MAGIC SELECT v.h3_r9, v.vehicle_km_per_day, round(s.peak_speed_kph) AS peak_speed_kph
 # MAGIC FROM volume v JOIN speed s ON s.h3_r9 = v.h3_r9
-# MAGIC ORDER BY v.total_aadt DESC
+# MAGIC ORDER BY v.vehicle_km_per_day DESC
 # MAGIC LIMIT 20
 # MAGIC ```
 # MAGIC

@@ -18,7 +18,7 @@
 # MAGIC | `dseg_id` | Directional segment ID; join key to `hourly_stats`. |
 # MAGIC | `segment_id` | Legacy segment ID used before 2023. |
 # MAGIC | `new_segment_id` | Current segment identifier as text. |
-# MAGIC | `frc` | Functional Road Class: 0 is motorway and 7 is a local road. |
+# MAGIC | `frc` | Functional Road Class: 0 is motorway and 7 is a local road. The deliveries carry 0 to 4, 6 and 7. |
 # MAGIC | `speed_limit_kph` | Posted speed limit in km/h. |
 # MAGIC | `has_verified_speed` | Whether the speed limit has been field verified. |
 # MAGIC | `street_name` | Road name; may be null. |
@@ -37,8 +37,8 @@
 # MAGIC | `h3_r9` | H3 cell containing the segment centre, at resolution 9. |
 # MAGIC | `time_zone` | IANA time zone used to convert UTC measurements to local time. |
 # MAGIC | `country_iso3` | Three-letter ISO country code. |
-# MAGIC | `osm_way_ids` | Matching OpenStreetMap way IDs. |
-# MAGIC | `osm_offsets` | Offsets locating the segment within the matching OSM ways. |
+# MAGIC | `osm_way_ids` | OpenStreetMap ways the segment lies on. |
+# MAGIC | `osm_offsets` | The segment's offset along each of those ways, in the same order. |
 # MAGIC | `region` | Metropolitan sample extract. |
 # MAGIC | `tile_id` | Morton tile identifier. |
 # MAGIC | `map_version` | TomTom map version. |
@@ -54,7 +54,7 @@
 # MAGIC | `harmonic_speed_kph` | Harmonic mean speed in km/h; use for travel-time analysis. |
 # MAGIC | `median_speed_kph` | Median speed in km/h. |
 # MAGIC | `stddev_speed_kph` | Standard deviation of speed in km/h. |
-# MAGIC | `speed_percentiles_kph` | Nineteen speed percentiles from p5 to p95; may be null when coverage is low. |
+# MAGIC | `speed_percentiles_kph` | Nineteen speed percentiles from p5 to p95; null when the hour rests on a single observation. |
 # MAGIC | `tile_id` | Morton tile identifier. |
 # MAGIC | `map_version` | TomTom map version. |
 # MAGIC
@@ -62,13 +62,16 @@
 # MAGIC Take it too and volume and speed can be read together; the last section here
 # MAGIC joins them.
 # MAGIC
-# MAGIC Three things to know before you start.
+# MAGIC Four things to know before you start.
 # MAGIC
 # MAGIC 1. Speeds are km/h.
 # MAGIC 2. Hours are UTC. Use `segments.time_zone` before you say anything about rush hour.
-# MAGIC 3. `speed_percentiles_kph` is null for roughly one row in six, where too few vehicles
-# MAGIC    were seen in that hour to publish a distribution. The mean is still there. Filter
-# MAGIC    rather than assume.
+# MAGIC 3. `speed_percentiles_kph` is null for roughly one row in six. A null means the hour
+# MAGIC    rests on a single observation; the mean is still there. It is the one sample-size
+# MAGIC    signal in the data, so carry it as a flag rather than drop the rows.
+# MAGIC 4. Regions are metropolitan extracts far wider than the city. `london` runs from the
+# MAGIC    Dorset coast to the Peak District and includes Birmingham, Bristol and Southampton.
+# MAGIC    Section 1 prints the extent.
 
 # COMMAND ----------
 
@@ -151,8 +154,18 @@ display(spark.sql(f"""
         SELECT min(observation_date) AS first_date, max(observation_date) AS last_date,
                count(DISTINCT observation_date) AS days, count(*) AS hourly_rows,
                round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
-                   AS pct_rows_without_percentiles
+                   AS pct_single_observation
         FROM {hourly}
+        """))
+
+display(spark.sql(f"""
+        SELECT hour_utc,
+               count(*) AS hourly_rows,
+               round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
+                   AS pct_single_observation
+        FROM {hourly}
+        GROUP BY hour_utc
+        ORDER BY hour_utc
         """))
 
 # COMMAND ----------
@@ -192,21 +205,44 @@ display(spark.sql(f"""
 # MAGIC ## 3. Daily speed by local time
 # MAGIC
 # MAGIC `from_utc_timestamp` and `segments.time_zone` convert measurements to local time.
+# MAGIC
+# MAGIC Speed by hour is read **within each road class**. The set of segments that report changes
+# MAGIC through the day: at night the mix tilts towards motorways and major roads, by day towards
+# MAGIC local streets. The first table has one column per class; the second reads speed as a share
+# MAGIC of the posted limit, which compares across classes, next to the share of rows on classes 0
+# MAGIC to 2 in that hour.
 
 # COMMAND ----------
 
-display(spark.sql(f"""
-        SELECT
-            hour(from_utc_timestamp(
-                make_timestamp(year(h.observation_date), month(h.observation_date),
-                               day(h.observation_date), h.hour_utc, 0, 0),
-                s.time_zone))                                           AS hour_local,
-            round(avg(h.harmonic_speed_kph), 1)                         AS avg_speed_kph,
-            round(100.0 * avg(h.harmonic_speed_kph / s.speed_limit_kph), 1)
-                                                                        AS pct_of_speed_limit
-        FROM {hourly} h
-        JOIN {segments} s USING (dseg_id)
-        WHERE s.frc <= 4 AND s.speed_limit_kph > 0
+spark.sql(f"""
+    CREATE OR REPLACE TEMPORARY VIEW local_hours AS
+    SELECT
+        hour(from_utc_timestamp(
+            make_timestamp(year(h.observation_date), month(h.observation_date),
+                           day(h.observation_date), h.hour_utc, 0, 0),
+            s.time_zone))                                               AS hour_local,
+        s.frc,
+        h.harmonic_speed_kph,
+        h.harmonic_speed_kph / s.speed_limit_kph                        AS share_of_limit
+    FROM {hourly} h
+    JOIN {segments} s USING (dseg_id)
+    WHERE s.frc <= 4 AND s.speed_limit_kph > 0
+    """)
+
+display(spark.sql("""
+        SELECT * FROM (
+            SELECT hour_local, frc, harmonic_speed_kph FROM local_hours
+        )
+        PIVOT (round(avg(harmonic_speed_kph), 1) FOR frc IN (0 AS frc_0, 1 AS frc_1, 2 AS frc_2, 3 AS frc_3, 4 AS frc_4))
+        ORDER BY hour_local
+        """))
+
+display(spark.sql("""
+        SELECT hour_local,
+               round(100.0 * avg(share_of_limit), 1)                    AS pct_of_speed_limit,
+               round(100.0 * avg(CASE WHEN frc <= 2 THEN 1 ELSE 0 END), 1)
+                                                                        AS pct_rows_on_frc_0_to_2
+        FROM local_hours
         GROUP BY hour_local
         ORDER BY hour_local
         """))
@@ -228,6 +264,11 @@ display(spark.sql(f"""
 # MAGIC
 # MAGIC The array has 19 values, from p5 to p95 in steps of 5. p85 is the 17th value.
 # MAGIC `element_at` starts counting at 1. The `arr[i]` form starts at 0 and would return p80.
+# MAGIC
+# MAGIC Hours with a single observation have no array. They stay in the view: the mean counts
+# MAGIC towards speed and congestion, the speeding rate is taken over the hours that have a
+# MAGIC distribution, and `single_observation_pct` says how much of each segment rests on one
+# MAGIC vehicle.
 
 # COMMAND ----------
 
@@ -240,16 +281,18 @@ spark.sql(f"""
             h.stddev_speed_kph,
             s.frc,
             s.length_m,
-            CASE WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
+            CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
+                 WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
                  THEN 1 ELSE 0 END                                  AS speeding,
             CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph
-                 THEN 1 ELSE 0 END                                  AS congested
+                 THEN 1 ELSE 0 END                                  AS congested,
+            CASE WHEN h.speed_percentiles_kph IS NULL THEN 1 ELSE 0 END
+                                                                    AS single_observation
         FROM {hourly} h
         JOIN {segments} s USING (dseg_id)
         WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
           AND s.speed_limit_kph > 0
           AND h.harmonic_speed_kph > 0
-          AND h.speed_percentiles_kph IS NOT NULL
     )
     SELECT
         dseg_id,
@@ -259,17 +302,19 @@ spark.sql(f"""
         round(avg(harmonic_speed_kph), 2)                           AS avg_speed_kph,
         round(avg(stddev_speed_kph) / avg(harmonic_speed_kph), 3)   AS variability,
         round(100.0 * avg(speeding), 1)                             AS speeding_pct,
-        round(100.0 * avg(congested), 1)                            AS congestion_pct
+        round(100.0 * avg(congested), 1)                            AS congestion_pct,
+        round(100.0 * avg(single_observation), 1)                   AS single_observation_pct
     FROM flagged
     GROUP BY dseg_id
-    HAVING count(*) >= 24
+    HAVING count(*) >= 24 AND count(speeding) > 0
     """)
 
 display(spark.sql("""
         SELECT frc, count(*) AS segments,
-               round(avg(speeding_pct), 1)     AS avg_speeding_pct,
-               round(avg(congestion_pct), 1)   AS avg_congestion_pct,
-               round(avg(variability), 3)      AS avg_variability
+               round(avg(speeding_pct), 1)            AS avg_speeding_pct,
+               round(avg(congestion_pct), 1)          AS avg_congestion_pct,
+               round(avg(variability), 3)             AS avg_variability,
+               round(avg(single_observation_pct), 1)  AS avg_single_observation_pct
         FROM segment_metrics GROUP BY frc ORDER BY frc
         """))
 
@@ -286,6 +331,9 @@ display(spark.sql("""
 # MAGIC A factor with no variation adds no information, so it contributes nothing to the score.
 # MAGIC The `coalesce` around each term handles this case. For one day, every segment has exactly
 # MAGIC 24 measured hours, so `hours_measured` is constant and drops out.
+# MAGIC
+# MAGIC `single_observation_pct` is kept beside the score rather than inside it. A segment whose
+# MAGIC hours mostly rest on one vehicle deserves a wider confidence band, not a different rank.
 # MAGIC
 # MAGIC The score also depends on the **date window** at the top of this notebook. By default,
 # MAGIC it covers one Wednesday: 2.59M segments and 38.4M hourly rows. This is enough data for
@@ -320,7 +368,7 @@ spark.sql("""
 
 display(spark.sql("""
         SELECT dseg_id, frc, avg_speed_kph, variability, speeding_pct, congestion_pct,
-               risk_score
+               single_observation_pct, risk_score
         FROM segment_risk ORDER BY risk_score DESC LIMIT 20
         """))
 
@@ -362,7 +410,7 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-# MAGIC %pip install folium shapely
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2
 
 # COMMAND ----------
 
@@ -437,7 +485,8 @@ else:
 # MAGIC how often speeds exceed the limit and how much speeds vary at 08:00 versus 14:00.
 # MAGIC
 # MAGIC **Join through OpenStreetMap.** If journeys already have an OpenStreetMap match,
-# MAGIC `segments.osm_way_ids` lets you skip another matching step.
+# MAGIC `segments.osm_way_ids` lets you skip another matching step. `arrays_overlap` joins a
+# MAGIC list of matched way IDs to the segments in one step; the use case notebook shows it.
 # MAGIC
 # MAGIC **Separate weekdays and weekends.** Use `observation_date` to identify the day of week.
 # MAGIC Their traffic patterns differ, so combining them can hide useful information.
@@ -462,14 +511,14 @@ else:
 # MAGIC   GROUP BY s.h3_r9
 # MAGIC ),
 # MAGIC volume AS (
-# MAGIC   SELECT h3_r9, sum(aadt) AS total_aadt
+# MAGIC   SELECT h3_r9, round(sum(aadt * length_m) / 1000) AS vehicle_km_per_day
 # MAGIC   FROM TomTom_Traffic_Volumes.traffic_volumes.aadt_segments
 # MAGIC   WHERE region = 'london' AND vintage_year = 2025  -- same region as the widget above
 # MAGIC   GROUP BY h3_r9
 # MAGIC )
-# MAGIC SELECT v.h3_r9, round(s.peak_speed_kph) AS peak_speed_kph, v.total_aadt
+# MAGIC SELECT v.h3_r9, round(s.peak_speed_kph) AS peak_speed_kph, v.vehicle_km_per_day
 # MAGIC FROM volume v JOIN speed s ON s.h3_r9 = v.h3_r9
-# MAGIC ORDER BY v.total_aadt DESC
+# MAGIC ORDER BY v.vehicle_km_per_day DESC
 # MAGIC LIMIT 20
 # MAGIC ```
 # MAGIC
