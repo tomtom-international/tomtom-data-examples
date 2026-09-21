@@ -83,6 +83,7 @@ import folium
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import plotly.express as px
+import plotly.graph_objects as go
 from shapely import wkt
 
 px.defaults.template = "plotly_white"
@@ -140,8 +141,8 @@ hourly = "hourly_stats"
 # notebook processes one day at a time.
 #
 # The default is Wednesday, 2025-09-03, a typical midweek baseline. Set the dates to
-# 2025-09-01 and 2025-09-07 to process the full week. See the risk score note first:
-# combining weekdays and weekends changes what the score means.
+# 2025-09-01 and 2025-09-07 to process the full week; weekday and weekend patterns differ,
+# so read them separately where the difference matters.
 dbutils.widgets.text("date_from", "2025-09-03", "First observation date")
 dbutils.widgets.text("date_to", "2025-09-03", "Last observation date")
 date_from = dbutils.widgets.get("date_from")
@@ -154,6 +155,9 @@ date_to = dbutils.widgets.get("date_to")
 # MAGIC
 # MAGIC Every column carries a description. `DESCRIBE TABLE` is worth a minute here, because
 # MAGIC several fields have an edge that is cheaper to learn now than inside a model.
+# MAGIC
+# MAGIC The chart shows how the single-observation hours fall through the UTC day. They cluster
+# MAGIC at night, when few probes are on the road.
 
 # COMMAND ----------
 
@@ -172,15 +176,16 @@ display(spark.sql(f"""
         FROM {hourly}
         """))
 
-display(spark.sql(f"""
-        SELECT hour_utc,
-               count(*) AS hourly_rows,
+by_utc_hour = spark.sql(f"""
+        SELECT hour_utc, count(*) AS hourly_rows,
                round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
                    AS pct_single_observation
-        FROM {hourly}
-        GROUP BY hour_utc
-        ORDER BY hour_utc
-        """))
+        FROM {hourly} GROUP BY hour_utc ORDER BY hour_utc
+        """).toPandas()
+
+px.bar(by_utc_hour, x="hour_utc", y="pct_single_observation", hover_data=["hourly_rows"],
+       labels=dict(hour_utc="UTC hour", pct_single_observation="% of rows on one vehicle"),
+       title=f"Hours resting on a single observation, {region}").show()
 
 # COMMAND ----------
 
@@ -196,12 +201,12 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-display(spark.sql(f"""
+by_class = spark.sql(f"""
         WITH observed AS (
             SELECT dseg_id, count(*) AS hours FROM {hourly} GROUP BY dseg_id
         )
         SELECT
-            s.frc,
+            cast(s.frc AS STRING)                           AS frc,
             count(*)                                        AS segments,
             round(sum(s.length_m) / 1000)                   AS network_km,
             round(avg(s.speed_limit_kph), 1)                AS avg_speed_limit_kph,
@@ -211,7 +216,12 @@ display(spark.sql(f"""
         LEFT JOIN observed o USING (dseg_id)
         GROUP BY s.frc
         ORDER BY s.frc
-        """))
+        """).toPandas()
+
+display(by_class)
+px.bar(by_class, x="frc", y="pct_with_measurements", hover_data=["segments", "network_km", "avg_hours_measured"],
+       labels=dict(frc="road class", pct_with_measurements="% of segments with any measurement"),
+       title=f"Coverage by road class, {region}").show()
 
 # COMMAND ----------
 
@@ -222,9 +232,9 @@ display(spark.sql(f"""
 # MAGIC
 # MAGIC Speed by hour is read **within each road class**. The set of segments that report changes
 # MAGIC through the day: at night the mix tilts towards motorways and major roads, by day towards
-# MAGIC local streets. The chart has one line per class; the table reads speed as a share of the
-# MAGIC posted limit, which compares across classes, next to the share of rows on classes 0 to 2
-# MAGIC in that hour.
+# MAGIC local streets. The first chart has one line per class. The second reads speed as a share
+# MAGIC of the posted limit, which compares across classes, above the share of rows on classes 0
+# MAGIC to 2 in that hour.
 
 # COMMAND ----------
 
@@ -240,7 +250,8 @@ spark.sql(f"""
         h.harmonic_speed_kph / s.speed_limit_kph                        AS share_of_limit
     FROM {hourly} h
     JOIN {segments} s USING (dseg_id)
-    WHERE s.frc <= 4 AND s.speed_limit_kph > 0
+    WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
+      AND s.frc <= 4 AND s.speed_limit_kph > 0
     """)
 
 by_hour = spark.sql("""
@@ -252,15 +263,17 @@ px.line(by_hour, x="hour_local", y="speed_kph", color="frc", markers=True,
         labels=dict(hour_local="local hour", speed_kph="harmonic speed, km/h", frc="class"),
         title=f"Speed by local hour and road class, {region}").show()
 
-display(spark.sql("""
+mix = spark.sql("""
         SELECT hour_local,
                round(100.0 * avg(share_of_limit), 1)                    AS pct_of_speed_limit,
                round(100.0 * avg(CASE WHEN frc <= 2 THEN 1 ELSE 0 END), 1)
                                                                         AS pct_rows_on_frc_0_to_2
-        FROM local_hours
-        GROUP BY hour_local
-        ORDER BY hour_local
-        """))
+        FROM local_hours GROUP BY hour_local ORDER BY hour_local
+        """).toPandas()
+
+px.line(mix.melt("hour_local", var_name="measure", value_name="pct"), x="hour_local", y="pct",
+        facet_row="measure", markers=True, labels=dict(hour_local="local hour", pct="%"),
+        title="Speed as a share of the limit, and the class mix behind it").update_yaxes(matches=None).show()
 
 # COMMAND ----------
 
@@ -324,80 +337,57 @@ spark.sql(f"""
     HAVING count(*) >= 24 AND count(speeding) > 0
     """)
 
-display(spark.sql("""
-        SELECT frc, count(*) AS segments,
-               round(avg(speeding_pct), 1)            AS avg_speeding_pct,
-               round(avg(congestion_pct), 1)          AS avg_congestion_pct,
-               round(avg(variability), 3)             AS avg_variability,
-               round(avg(single_observation_pct), 1)  AS avg_single_observation_pct
+signals = spark.sql("""
+        SELECT cast(frc AS STRING) AS frc, count(*) AS segments,
+               round(avg(speeding_pct), 1)           AS speeding,
+               round(avg(congestion_pct), 1)         AS congested,
+               round(avg(single_observation_pct), 1) AS single_observation,
+               round(avg(variability), 3)            AS avg_variability
         FROM segment_metrics GROUP BY frc ORDER BY frc
-        """))
+        """).toPandas()
+
+px.bar(signals.melt("frc", ["speeding", "congested", "single_observation"], "signal", "pct_of_hours"),
+       x="frc", y="pct_of_hours", color="signal", barmode="group",
+       labels=dict(frc="road class", pct_of_hours="% of measured hours", signal=""),
+       title=f"How often each signal fires, by road class, {region}").show()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. One score per segment
+# MAGIC ## 5. One segment's day
 # MAGIC
-# MAGIC Five factors are scaled from 0 to 1 across this extract and then weighted. The weights
-# MAGIC are examples. Calibrate them with your own loss history before using the score. Because
-# MAGIC the scaling is relative to this extract, the score ranks segments only within this extract
-# MAGIC and cannot be compared across releases.
-# MAGIC
-# MAGIC A factor with no variation adds no information, so it contributes nothing to the score.
-# MAGIC The `coalesce` around each term handles this case. For one day, every segment has exactly
-# MAGIC 24 measured hours, so `hours_measured` is constant and drops out.
-# MAGIC
-# MAGIC `single_observation_pct` is kept beside the score rather than inside it. A segment whose
-# MAGIC hours mostly rest on one vehicle deserves a wider confidence band, not a different rank.
-# MAGIC
-# MAGIC The score also depends on the **date window** at the top of this notebook. By default,
-# MAGIC it covers one Wednesday: 2.59M segments and 38.4M hourly rows. This is enough data for
-# MAGIC ranking. A full week does not necessarily improve the score. `congestion_pct` and
-# MAGIC `speeding_pct` are based on measured hours, so adding Saturday and Sunday dilutes them
-# MAGIC on commuter roads. Roads that are busy on weekends may then look worse. Score weekdays
-# MAGIC and weekends separately if needed.
-# MAGIC
-# MAGIC The chart shows how the score spreads within each road class. Section 7 draws the
-# MAGIC segments above its 80th percentile.
+# MAGIC The array is easiest to read on a single road. Below is the most variable motorway or
+# MAGIC trunk segment of the day with a full set of arrays: the band runs from p5 to p95, so its
+# MAGIC width is the spread of speeds in that hour, and the dashed line is the posted limit.
 
 # COMMAND ----------
 
-spark.sql("""
-    CREATE OR REPLACE TEMPORARY VIEW segment_risk AS
-    WITH span AS (
-        SELECT min(avg_speed_kph) AS lo_speed, max(avg_speed_kph) AS hi_speed,
-               min(variability) AS lo_var, max(variability) AS hi_var,
-               min(congestion_pct) AS lo_cong, max(congestion_pct) AS hi_cong,
-               min(speeding_pct) AS lo_speed_pct, max(speeding_pct) AS hi_speed_pct,
-               min(hours_measured) AS lo_hours, max(hours_measured) AS hi_hours
-        FROM segment_metrics
-    )
-    SELECT
-        m.*,
-        round(
-              0.25 * coalesce((m.avg_speed_kph  - s.lo_speed)     / nullif(s.hi_speed - s.lo_speed, 0), 0)
-            + 0.25 * coalesce((m.variability    - s.lo_var)       / nullif(s.hi_var - s.lo_var, 0), 0)
-            + 0.20 * coalesce((m.congestion_pct - s.lo_cong)      / nullif(s.hi_cong - s.lo_cong, 0), 0)
-            + 0.15 * coalesce((m.speeding_pct   - s.lo_speed_pct) / nullif(s.hi_speed_pct - s.lo_speed_pct, 0), 0)
-            + 0.15 * coalesce((m.hours_measured - s.lo_hours)     / nullif(s.hi_hours - s.lo_hours, 0), 0)
-        , 4) AS risk_score
-    FROM segment_metrics m CROSS JOIN span s
-    """)
+pick = spark.sql("""
+        SELECT dseg_id FROM segment_metrics
+        WHERE frc <= 1 AND single_observation_pct = 0
+        ORDER BY variability DESC LIMIT 1
+        """).first().dseg_id
 
-display(spark.sql("""
-        SELECT dseg_id, frc, avg_speed_kph, variability, speeding_pct, congestion_pct,
-               single_observation_pct, risk_score
-        FROM segment_risk ORDER BY risk_score DESC LIMIT 20
-        """))
-
-scores = spark.sql("""
-        SELECT cast(frc AS STRING) AS frc, round(risk_score, 2) AS risk_score, count(*) AS segments
-        FROM segment_risk GROUP BY 1, 2 ORDER BY 1, 2
+day = spark.sql(f"""
+        SELECT hour(from_utc_timestamp(make_timestamp(year(h.observation_date), month(h.observation_date),
+                                                      day(h.observation_date), h.hour_utc, 0, 0), s.time_zone)) AS hour_local,
+               element_at(h.speed_percentiles_kph, 1) AS p5, element_at(h.speed_percentiles_kph, 10) AS p50,
+               element_at(h.speed_percentiles_kph, 19) AS p95, h.harmonic_speed_kph, s.speed_limit_kph,
+               any_value(s.street_name) OVER () AS street_name, any_value(s.frc) OVER () AS frc
+        FROM {hourly} h JOIN {segments} s USING (dseg_id)
+        WHERE h.dseg_id = '{pick}' AND h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
+        ORDER BY hour_local
         """).toPandas()
 
-px.line(scores, x="risk_score", y="segments", color="frc", log_y=True,
-        labels=dict(risk_score="risk score", frc="class"),
-        title="Segments per risk score, by road class").show()
+go.Figure([
+    go.Scatter(x=day.hour_local, y=day.p95, line=dict(width=0), showlegend=False, hoverinfo="skip"),
+    go.Scatter(x=day.hour_local, y=day.p5, fill="tonexty", line=dict(width=0), name="p5 to p95",
+               fillcolor="rgba(99, 110, 250, 0.2)"),
+    go.Scatter(x=day.hour_local, y=day.p50, name="median"),
+    go.Scatter(x=day.hour_local, y=day.harmonic_speed_kph, name="harmonic mean"),
+    go.Scatter(x=day.hour_local, y=day.speed_limit_kph, name="speed limit", line=dict(dash="dash", color="grey")),
+]).update_layout(title=f"{day.street_name[0] or 'unnamed'}, class {day.frc[0]}, {date_from}",
+                 xaxis_title="local hour", yaxis_title="km/h").show()
 
 # COMMAND ----------
 
@@ -410,21 +400,22 @@ px.line(scores, x="risk_score", y="segments", color="frc", log_y=True,
 # MAGIC to your points, then join on it.
 # MAGIC
 # MAGIC Weight results by length. A 2 km motorway section should count more than a 30 m slip
-# MAGIC road.
+# MAGIC road. Below, the cells where congestion takes the largest share of the measured hours.
 
 # COMMAND ----------
 
 display(spark.sql(f"""
         SELECT
             s.h3_r9,
-            count(*)                                                    AS segments,
-            round(sum(r.risk_score * r.length_m) / sum(r.length_m), 4)  AS risk_by_length,
-            round(sum(r.length_m) / 1000, 2)                            AS network_km
-        FROM segment_risk r
+            count(*)                                                        AS segments,
+            round(sum(m.congestion_pct * m.length_m) / sum(m.length_m), 1)  AS congestion_pct_by_length,
+            round(sum(m.speeding_pct * m.length_m) / sum(m.length_m), 1)    AS speeding_pct_by_length,
+            round(sum(m.length_m) / 1000, 2)                                AS network_km
+        FROM segment_metrics m
         JOIN {segments} s USING (dseg_id)
         GROUP BY s.h3_r9
         HAVING count(*) >= 3
-        ORDER BY risk_by_length DESC
+        ORDER BY congestion_pct_by_length DESC
         LIMIT 25
         """))
 
@@ -433,7 +424,8 @@ display(spark.sql(f"""
 # MAGIC %md
 # MAGIC ## 7. Map the results
 # MAGIC
-# MAGIC Geometry is a WKT LineString in EPSG:4326. Set `AREA` to a region in your extract.
+# MAGIC Geometry is a WKT LineString in EPSG:4326. The map draws the major roads in the box that
+# MAGIC spend the largest share of the day congested. Set `AREA` to a region in your extract.
 
 # COMMAND ----------
 
@@ -446,22 +438,21 @@ AREA = (centre.lon - 0.15, centre.lat - 0.065, centre.lon + 0.15, centre.lat + 0
 # Each segment becomes its own SVG path with its own tooltip, so we limit the rendered segments
 MAX_SEGMENTS_ON_MAP = 1500
 
-worst = spark.sql(f"""
-    SELECT s.geometry_wkt, s.street_name, s.frc, r.risk_score, r.avg_speed_kph,
-           r.speeding_pct
-    FROM segment_risk r
+busy = spark.sql(f"""
+    SELECT s.geometry_wkt, s.street_name, s.frc, m.congestion_pct, m.avg_speed_kph,
+           m.speeding_pct
+    FROM segment_metrics m
     JOIN {segments} s USING (dseg_id)
-    WHERE s.frc <= 4
+    WHERE s.frc <= 4 AND m.congestion_pct > 0
       AND s.max_lon >= {AREA[0]} AND s.min_lon <= {AREA[2]}
       AND s.max_lat >= {AREA[1]} AND s.min_lat <= {AREA[3]}
-      AND r.risk_score >= (SELECT percentile_approx(risk_score, 0.8) FROM segment_risk)
-    ORDER BY r.risk_score DESC
+    ORDER BY m.congestion_pct DESC
     LIMIT {MAX_SEGMENTS_ON_MAP}
     """).toPandas()
 
-print(f"{len(worst):,} highest scoring major road segments in that box")
+print(f"{len(busy):,} most congested major road segments in that box")
 
-if len(worst):
+if len(busy):
     chart = folium.Map(
         location=((AREA[1] + AREA[3]) / 2, (AREA[0] + AREA[2]) / 2),
         zoom_start=12,
@@ -473,17 +464,17 @@ if len(worst):
             "</style>"
         )
     )
-    shade = mcolors.Normalize(vmin=worst.risk_score.min(), vmax=worst.risk_score.max())
+    shade = mcolors.Normalize(vmin=0, vmax=busy.congestion_pct.max())
 
-    for row in worst.itertuples():
+    for row in busy.itertuples():
         folium.PolyLine(
             [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
-            color=mcolors.to_hex(cm.YlOrRd(shade(row.risk_score))),
+            color=mcolors.to_hex(cm.YlOrRd(shade(row.congestion_pct))),
             weight=3,
             opacity=0.85,
             tooltip=(
                 f"{row.street_name or 'unnamed'}, class {row.frc}, "
-                f"score {row.risk_score:.2f}, {row.avg_speed_kph:.0f} km/h, "
+                f"congested in {row.congestion_pct:.0f}% of hours, {row.avg_speed_kph:.0f} km/h, "
                 f"speeding in {row.speeding_pct:.0f}% of hours"
             ),
         ).add_to(chart)
@@ -508,6 +499,10 @@ else:
 # MAGIC
 # MAGIC **Separate weekdays and weekends.** Use `observation_date` to identify the day of week.
 # MAGIC Their traffic patterns differ, so combining them can hide useful information.
+# MAGIC
+# MAGIC **Turn the signals into a score.** The territory risk assessment use case in this
+# MAGIC repository scales these signals, weights them, and joins them to traffic volume for a
+# MAGIC scored territory and a scored route.
 # MAGIC
 # MAGIC **Add volume.** Speed shows how bad traffic is; volume shows how many people it affects.
 # MAGIC TomTom Traffic Volumes is a separate Marketplace listing for the same four metropolitan

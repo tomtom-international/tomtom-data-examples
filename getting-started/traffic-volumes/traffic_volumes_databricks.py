@@ -78,7 +78,11 @@ import folium
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import numpy as np
+import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
+import shapely
+from pyspark.sql import functions as F
 from shapely import wkt
 
 px.defaults.template = "plotly_white"
@@ -103,6 +107,30 @@ except Exception as error:
 
 aadt = f"{catalog}.traffic_volumes.aadt_segments"
 coverage = f"{catalog}.traffic_volumes.coverage"
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC `length_m` joined the table in September 2026. A share published before that lacks it, so
+# MAGIC the cell below derives it from the geometry when it is missing and reads the table through
+# MAGIC a view of the same name.
+
+# COMMAND ----------
+
+if "length_m" not in spark.table(aadt).columns:
+
+    @F.pandas_udf("double")
+    def length_m(geometry_wkt: pd.Series) -> pd.Series:
+        geoms = shapely.from_wkt(geometry_wkt.to_numpy())
+        xy, i = shapely.get_coordinates(geoms, return_index=True)
+        lon, lat = np.radians(xy[:, 0]), np.radians(xy[:, 1])
+        a = (np.sin((lat[1:] - lat[:-1]) / 2) ** 2
+             + np.cos(lat[:-1]) * np.cos(lat[1:]) * np.sin((lon[1:] - lon[:-1]) / 2) ** 2)
+        step = 2 * 6_371_008.8 * np.arcsin(np.sqrt(a)) * (i[1:] == i[:-1])
+        return pd.Series(np.bincount(i[1:], weights=step, minlength=len(geoms)))
+
+    spark.table(aadt).withColumn("length_m", length_m("geometry_wkt")).createOrReplaceTempView("aadt_segments")
+    aadt = "aadt_segments"
 
 # COMMAND ----------
 
@@ -157,20 +185,29 @@ px.bar(cov, x="frc_label", y="coverage_pct", color="region", barmode="group", fa
 # MAGIC ## 3. Volume by road class
 # MAGIC
 # MAGIC Traffic is unevenly distributed. A few motorway segments carry more traffic than many
-# MAGIC local roads, so medians and percentiles are more useful than means.
+# MAGIC local roads, so medians and percentiles are more useful than means. The boxes run from
+# MAGIC the 10th to the 90th percentile of AADT within each class, on a log axis. The bars set
+# MAGIC each class's share of the segments against its share of the vehicle-kilometres.
 
 # COMMAND ----------
 
-display(spark.sql(f"""
-        SELECT frc, count(*) AS segments,
-               round(percentile_approx(aadt, 0.5)) AS median_aadt,
-               round(percentile_approx(aadt, 0.9)) AS p90_aadt,
-               max(aadt)                           AS max_aadt,
-               round(100.0 * sum(aadt) / sum(sum(aadt)) OVER (), 1) AS pct_of_all_traffic
-        FROM {aadt}
-        GROUP BY frc
-        ORDER BY frc
-        """))
+by_class = spark.sql(f"""
+        SELECT cast(frc AS STRING) AS frc,
+               percentile_approx(aadt, array(0.1, 0.25, 0.5, 0.75, 0.9)) AS q,
+               round(100.0 * count(*) / sum(count(*)) OVER (), 1)                         AS pct_of_segments,
+               round(100.0 * sum(length_m) / sum(sum(length_m)) OVER (), 1)               AS pct_of_network_km,
+               round(100.0 * sum(aadt * length_m) / sum(sum(aadt * length_m)) OVER (), 1) AS pct_of_vehicle_km
+        FROM {aadt} GROUP BY frc ORDER BY frc
+        """).toPandas()
+
+q = np.vstack(by_class.q)
+go.Figure(go.Box(x=by_class.frc, lowerfence=q[:, 0], q1=q[:, 1], median=q[:, 2], q3=q[:, 3], upperfence=q[:, 4])
+          ).update_layout(title="AADT by road class, 10th to 90th percentile", xaxis_title="road class",
+                          yaxis_title="vehicles per day", yaxis_type="log").show()
+
+px.bar(by_class.melt("frc", ["pct_of_segments", "pct_of_network_km", "pct_of_vehicle_km"], "share", "pct"),
+       x="frc", y="pct", color="share", barmode="group",
+       labels=dict(frc="road class", pct="% of the extract"), title="Where the roads are and where the traffic is").show()
 
 # COMMAND ----------
 
@@ -201,22 +238,22 @@ px.imshow(profile, x=[f"{h:02d}" for h in range(24)], y=["Mon", "Tue", "Wed", "T
 # MAGIC ## 5. How concentrated is the traffic
 # MAGIC
 # MAGIC A segment with 20,000 vehicles spread across the day is different from one with half its
-# MAGIC traffic in four hours. The hourly array shows this difference. Below, we calculate the
-# MAGIC share of weekday traffic during the morning peak (07:00 to 09:59) and evening peak
-# MAGIC (16:00 to 18:59).
+# MAGIC traffic in four hours. The hourly array shows this difference. Below, each segment's share
+# MAGIC of weekday traffic in the morning peak (07:00 to 09:59) and evening peak (16:00 to 18:59),
+# MAGIC averaged by road class.
 
 # COMMAND ----------
 
 spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW peaks AS
     WITH spread AS (
-        SELECT region, vintage_year, segment_id, frc, aadt, h3_r9,
+        SELECT region, vintage_year, segment_id, frc,
                floor(pos / 24) AS day_index, pos % 24 AS hour_of_day, hour_aadt
         FROM {aadt}
         LATERAL VIEW posexplode(aadt_by_day_hour) t AS pos, hour_aadt
     )
     SELECT
-        region, vintage_year, segment_id, frc, aadt, h3_r9,
+        region, vintage_year, segment_id, frc,
         round(100.0 * sum(CASE WHEN day_index < 5 AND hour_of_day BETWEEN 7 AND 9
                                THEN hour_aadt ELSE 0 END)
                     / nullif(sum(CASE WHEN day_index < 5 THEN hour_aadt ELSE 0 END), 0), 1)
@@ -226,45 +263,23 @@ spark.sql(f"""
                     / nullif(sum(CASE WHEN day_index < 5 THEN hour_aadt ELSE 0 END), 0), 1)
             AS evening_peak_pct
     FROM spread
-    GROUP BY region, vintage_year, segment_id, frc, aadt, h3_r9
+    GROUP BY region, vintage_year, segment_id, frc
     """)
 
-display(spark.sql("""
-        SELECT frc, count(*) AS segments,
-               round(avg(morning_peak_pct), 1) AS avg_morning_peak_pct,
-               round(avg(evening_peak_pct), 1) AS avg_evening_peak_pct
+peak_share = spark.sql("""
+        SELECT cast(frc AS STRING) AS frc,
+               round(avg(morning_peak_pct), 1) AS morning_peak,
+               round(avg(evening_peak_pct), 1) AS evening_peak
         FROM peaks GROUP BY frc ORDER BY frc
-        """))
+        """).toPandas()
+
+px.bar(peak_share.melt("frc", var_name="peak", value_name="pct"), x="frc", y="pct", color="peak", barmode="group",
+       labels=dict(frc="road class", pct="% of weekday traffic"), title="Share of weekday traffic in the peaks").show()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. An exposure tier per segment
-# MAGIC
-# MAGIC Volume alone does not show exposure. The same AADT means different things on a motorway
-# MAGIC and a residential street. These tiers rank roads within each road class.
-# MAGIC This makes busy local roads easier to compare with other local roads.
-
-# COMMAND ----------
-
-display(spark.sql(f"""
-        WITH tiered AS (
-            SELECT region, vintage_year, frc, aadt,
-                   ntile(5) OVER (PARTITION BY region, vintage_year, frc ORDER BY aadt)
-                       AS exposure_tier
-            FROM {aadt}
-        )
-        SELECT exposure_tier, count(*) AS segments,
-               round(min(aadt)) AS min_aadt,
-               round(percentile_approx(aadt, 0.5)) AS median_aadt,
-               round(max(aadt)) AS max_aadt
-        FROM tiered GROUP BY exposure_tier ORDER BY exposure_tier
-        """))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 7. Scoring a portfolio through H3
+# MAGIC ## 6. Scoring a portfolio through H3
 # MAGIC
 # MAGIC `h3_r9` holds the [H3](https://h3geo.org/) cell of each segment's center at resolution 9,
 # MAGIC about 174 m across. Add the same cell to your addresses or journeys to join them with
@@ -292,7 +307,7 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 8. Putting it on a map
+# MAGIC ## 7. Putting it on a map
 # MAGIC
 # MAGIC Geometry is a WKT LineString in EPSG:4326. Filter on the bounding box columns first so
 # MAGIC only the segments you are about to draw get parsed. Set `REGION` and `AREA` to somewhere
@@ -377,7 +392,8 @@ else:
 # MAGIC **Combine with Traffic Stats.** Volume shows exposure and speed shows severity. Together
 # MAGIC they give a better risk picture. TomTom Traffic Stats is a separate Marketplace listing
 # MAGIC for the same four metropolitan areas. Both datasets have `h3_r9`, so you can join them
-# MAGIC without map matching.
+# MAGIC without map matching. The territory risk assessment use case in this repository builds
+# MAGIC a scored territory and a scored route from the two.
 # MAGIC
 # MAGIC The listings use separate catalogs. The query below uses the suggested names,
 # MAGIC `TomTom_Traffic_Volumes` and `TomTom_Traffic_Stats`. Replace them with your catalog names.

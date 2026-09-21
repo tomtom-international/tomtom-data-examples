@@ -14,8 +14,11 @@ and how often they exceed the limit. Neither factor alone gives a complete risk 
 
 ## The approach
 
-**Territory score.** Both datasets use H3 resolution 9 cells. Each cell covers about 0.1 km². We
-scale and combine five factors: total AADT, average speed, speed changes, speeding rate, and congestion. The weights are examples and should be tested against claims history.
+**Territory score.** Both datasets use H3 resolution 9 cells. Each cell covers about 0.1 km². The
+notebook builds exposure first (vehicle-kilometres per day, `aadt` times `length_m`), then four
+severity factors from the hourly speeds (mean speed, variability, speeding rate, congestion rate),
+then scales and weights the five into one score whose parts stay visible. The weights are examples
+and should be tested against claims history.
 
 **Route score.** `segments.osm_way_ids` lists the OpenStreetMap ways for each segment. A map matcher such as [Fast Map Matching](https://github.com/cyang-kth/fmm) can use this output directly. This lets us score a telematics trace against the roads it used.
 
@@ -23,11 +26,14 @@ scale and combine five factors: total AADT, average speed, speed changes, speedi
 
 Two types of cells score highly, for different reasons:
 
-| | Mean AADT | Mean speed | Hours speeding | Hours congested |
-|---|---|---|---|---|
-| Motorway speeds | 82,600 | 91.8 km/h | 61.2% | 2.6% |
-| Arterial speeds | 20,000 | 55.4 km/h | 28.2% | 33.0% |
-| Urban speeds | 47,100 | 29.2 km/h | 26.4% | 52.3% |
+| | Mean speed | Hours speeding | Hours congested |
+|---|---|---|---|
+| Motorway speeds | 91.8 km/h | 61.2% | 2.6% |
+| Arterial speeds | 55.4 km/h | 28.2% | 33.0% |
+| Urban speeds | 29.2 km/h | 26.4% | 52.3% |
+
+Urban cells carry the most vehicle-kilometres and motorway cells the highest speeds, so the two
+lift the score for opposite reasons; the notebook charts which factor lifts each top cell.
 
 The example route covers 26 km of the M20 motorway. It averages 105 km/h, with the 85th percentile
 above the limit in 94% of hours and almost no congestion. Frequent speeding on this road is a road
