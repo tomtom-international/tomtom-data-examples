@@ -14,11 +14,15 @@ and how often they exceed the limit. Neither factor alone gives a complete risk 
 
 ## The approach
 
-**Territory score.** Both datasets use H3 resolution 9 cells. Each cell covers about 0.1 km². The
-notebook builds exposure first (vehicle-kilometres per day, `aadt` times `length_m`), then four
-severity factors from the hourly speeds (mean speed, variability, speeding rate, congestion rate),
-then scales and weights the five into one score whose parts stay visible. The weights are examples
-and should be tested against claims history.
+**Territory score.** Both datasets use H3 resolution 9 cells, about 0.1 km² each. The notebook
+builds exposure first (vehicle-kilometres per day, `aadt` times `length_m`), then four severity
+factors from the hourly speeds (mean speed, variability, speeding rate, congestion rate), then
+scales and weights the five into one score whose parts stay visible. The weights are examples and
+should be tested against claims history.
+
+The factor distributions are worth a look before the score is. Exposure has a long tail, so
+min-max scaling gives ordinary cells almost no exposure signal; ranking or log-scaling that term
+first is usually better.
 
 **Route score.** `segments.osm_way_ids` lists the OpenStreetMap ways for each segment. A map matcher such as [Fast Map Matching](https://github.com/cyang-kth/fmm) can use this output directly. This lets us score a telematics trace against the roads it used.
 

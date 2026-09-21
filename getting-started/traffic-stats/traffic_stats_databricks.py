@@ -80,13 +80,45 @@
 # COMMAND ----------
 
 import folium
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import plotly.express as px
-import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+import numpy as np
+import seaborn as sns
+from matplotlib.collections import LineCollection
 from shapely import wkt
 
-px.defaults.template = "plotly_white"
+sns.set_theme(style="whitegrid", palette="colorblind")
+
+
+def basemap(lat, lon, zoom):
+    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
+    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
+    ))
+    return chart
+
+
+FRC_LABELS = {
+    0: "Motorway", 1: "Major road", 2: "Other major road", 3: "Secondary road",
+    4: "Local connecting", 5: "Local high importance", 6: "Local road", 7: "Minor local",
+}
+FRC_COLORS = {
+    0: "#800026", 1: "#bd0026", 2: "#e31a1c", 3: "#fc4e2a",
+    4: "#fd8d3c", 5: "#feb24c", 6: "#fed976", 7: "#ffeda0",
+}
+
+
+def histogram(source, expr, lo, hi, bins=50, where="TRUE"):
+    """Bucket counts computed in Spark, so no per-row data reaches the driver."""
+    return spark.sql(f"""
+        SELECT {lo} + ({hi} - {lo}) * (bucket + 0.5) / {bins} AS value, count(*) AS rows
+        FROM (
+            SELECT least({bins} - 1, greatest(0, floor(({expr} - {lo}) * {bins} / ({hi} - {lo})))) AS bucket
+            FROM {source} WHERE {where} AND {expr} IS NOT NULL
+        )
+        GROUP BY bucket ORDER BY bucket
+        """).toPandas()
 
 # COMMAND ----------
 
@@ -141,23 +173,45 @@ hourly = "hourly_stats"
 # notebook processes one day at a time.
 #
 # The default is Wednesday, 2025-09-03, a typical midweek baseline. Set the dates to
-# 2025-09-01 and 2025-09-07 to process the full week; weekday and weekend patterns differ,
-# so read them separately where the difference matters.
+# 2025-09-01 and 2025-09-07 to process the full week; the charts below then show one line
+# per day, and weekday and weekend separate cleanly.
 dbutils.widgets.text("date_from", "2025-09-03", "First observation date")
 dbutils.widgets.text("date_to", "2025-09-03", "Last observation date")
 date_from = dbutils.widgets.get("date_from")
 date_to = dbutils.widgets.get("date_to")
+
+# One row per segment-hour in the window, with the road attributes joined on. Everything
+# after section 2 reads this view.
+spark.sql(f"""
+    CREATE OR REPLACE TEMP VIEW measured AS
+    SELECT h.dseg_id, h.observation_date, h.hour_utc, h.avg_speed_kph, h.harmonic_speed_kph,
+           h.median_speed_kph, h.stddev_speed_kph, h.speed_percentiles_kph,
+           s.frc, s.speed_limit_kph, s.length_m, s.street_name, s.h3_r9,
+           date_format(h.observation_date, 'EEEE') AS day_of_week,
+           dayofweek(h.observation_date) IN (1, 7) AS is_weekend,
+           hour(from_utc_timestamp(
+               make_timestamp(year(h.observation_date), month(h.observation_date),
+                              day(h.observation_date), h.hour_utc, 0, 0), s.time_zone)) AS hour_local
+    FROM {hourly} h
+    JOIN {segments} s USING (dseg_id)
+    WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
+      AND h.harmonic_speed_kph > 0
+    """)
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 1. What is in the database
 # MAGIC
-# MAGIC Every column carries a description. `DESCRIBE TABLE` is worth a minute here, because
-# MAGIC several fields have an edge that is cheaper to learn now than inside a model.
+# MAGIC Every column carries a description, so `DESCRIBE TABLE` is worth a minute. The tables
+# MAGIC below give the extent, the dates, and the share of hours that rest on a single
+# MAGIC observation.
 # MAGIC
-# MAGIC The chart shows how the single-observation hours fall through the UTC day. They cluster
-# MAGIC at night, when few probes are on the road.
+# MAGIC The four panels are the road network itself, before any speed is read: how many segments
+# MAGIC of each class, what the posted limits look like, how long a segment typically is, and
+# MAGIC which physical road forms occur. Segment length matters more than it looks. Half of all
+# MAGIC segments are shorter than a city block, so anything averaged per segment is dominated by
+# MAGIC short ones unless you weight by length.
 
 # COMMAND ----------
 
@@ -176,311 +230,392 @@ display(spark.sql(f"""
         FROM {hourly}
         """))
 
-by_utc_hour = spark.sql(f"""
-        SELECT hour_utc, count(*) AS hourly_rows,
-               round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
-                   AS pct_single_observation
-        FROM {hourly} GROUP BY hour_utc ORDER BY hour_utc
+# COMMAND ----------
+
+frc_counts = spark.sql(f"SELECT frc, count(*) AS segments FROM {segments} GROUP BY frc ORDER BY frc").toPandas()
+limits = histogram(segments, "speed_limit_kph", 0, 140, bins=28)
+lengths = histogram(segments, "length_m", 0, 500, bins=50)
+fow = spark.sql(f"""
+        SELECT form_of_way, count(*) AS segments FROM {segments}
+        GROUP BY form_of_way ORDER BY segments DESC LIMIT 8
         """).toPandas()
 
-px.bar(by_utc_hour, x="hour_utc", y="pct_single_observation", hover_data=["hourly_rows"],
-       labels=dict(hour_utc="UTC hour", pct_single_observation="% of rows on one vehicle"),
-       title=f"Hours resting on a single observation, {region}").show()
+fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+
+axes[0, 0].bar(frc_counts.frc, frc_counts.segments,
+               color=[FRC_COLORS.get(f, "#999") for f in frc_counts.frc])
+axes[0, 0].set_title("Functional road class")
+axes[0, 0].set_xlabel("FRC (0 = motorway, 7 = local)")
+axes[0, 0].set_ylabel("Segment count")
+
+axes[0, 1].bar(limits.value, limits.rows, width=140 / 28 * 0.9, color="coral")
+axes[0, 1].set_title("Posted speed limit")
+axes[0, 1].set_xlabel("km/h")
+
+axes[1, 0].bar(lengths.value, lengths.rows, width=10 * 0.9, color="seagreen")
+axes[1, 0].set_title("Segment length (clipped at 500 m)")
+axes[1, 0].set_xlabel("metres")
+
+axes[1, 1].barh(fow.form_of_way[::-1], fow.segments[::-1], color="mediumpurple")
+axes[1, 1].set_title("Form of way (top 8)")
+
+plt.suptitle(f"The road network in {region}", fontsize=14, fontweight="bold")
+plt.tight_layout()
+plt.show()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Road class matters most
+# MAGIC ## 2. The network on a map
 # MAGIC
-# MAGIC Functional Road Class goes from 0 (motorway) to 7 (quiet residential street). Most
-# MAGIC segments are small roads, but most traffic uses the few major roads. An average across
-# MAGIC all segments therefore describes a quiet suburb, not a city.
-# MAGIC
-# MAGIC Coverage also matters. A road can be on the map even if no probe vehicle used it. Since
-# MAGIC traffic is lower on small roads, they usually have less coverage.
+# MAGIC Two views of the same roads. The static one covers the whole extract, coloured by class,
+# MAGIC which is the quickest way to see how wide these regional samples really are. The
+# MAGIC interactive one is limited to the major roads around the centre, with a layer per class,
+# MAGIC so you can switch classes on and off and hover a road for its name and limit.
 
 # COMMAND ----------
 
-by_class = spark.sql(f"""
-        WITH observed AS (
-            SELECT dseg_id, count(*) AS hours FROM {hourly} GROUP BY dseg_id
-        )
-        SELECT
-            cast(s.frc AS STRING)                           AS frc,
-            count(*)                                        AS segments,
-            round(sum(s.length_m) / 1000)                   AS network_km,
-            round(avg(s.speed_limit_kph), 1)                AS avg_speed_limit_kph,
-            round(100.0 * count(o.dseg_id) / count(*), 1)   AS pct_with_measurements,
-            round(avg(o.hours), 1)                          AS avg_hours_measured
-        FROM {segments} s
-        LEFT JOIN observed o USING (dseg_id)
-        GROUP BY s.frc
-        ORDER BY s.frc
+overview = spark.sql(f"""
+        SELECT geometry_wkt, frc FROM {segments} WHERE frc <= 4
+        ORDER BY frc, length_m DESC LIMIT 25000
         """).toPandas()
 
-display(by_class)
-px.bar(by_class, x="frc", y="pct_with_measurements", hover_data=["segments", "network_km", "avg_hours_measured"],
-       labels=dict(frc="road class", pct_with_measurements="% of segments with any measurement"),
-       title=f"Coverage by road class, {region}").show()
+lines = [list(wkt.loads(g).coords) for g in overview.geometry_wkt]
+mid_lat = np.mean([c[0][1] for c in lines])
+
+fig, ax = plt.subplots(figsize=(13, 9))
+collection = LineCollection(lines, array=overview.frc.values, cmap="RdYlGn_r", linewidths=0.4)
+ax.add_collection(collection)
+ax.autoscale()
+ax.set_aspect(1 / np.cos(np.radians(mid_lat)))
+ax.set_xlabel("Longitude")
+ax.set_ylabel("Latitude")
+ax.set_title(f"Major roads in the {region} extract ({len(overview):,} of the longest drawn)",
+             fontsize=13, fontweight="bold")
+fig.colorbar(collection, ax=ax, shrink=0.7, label="FRC (0 = motorway, 4 = local connecting)")
+plt.tight_layout()
+plt.show()
 
 # COMMAND ----------
 
-# MAGIC %md
-# MAGIC ## 3. Daily speed by local time
-# MAGIC
-# MAGIC `from_utc_timestamp` and `segments.time_zone` convert measurements to local time.
-# MAGIC
-# MAGIC Speed by hour is read **within each road class**. The set of segments that report changes
-# MAGIC through the day: at night the mix tilts towards motorways and major roads, by day towards
-# MAGIC local streets. The first chart has one line per class. The second reads speed as a share
-# MAGIC of the posted limit, which compares across classes, above the share of rows on classes 0
-# MAGIC to 2 in that hour.
+centre = spark.sql(f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}").first()
+AREA = (centre.lon - 0.12, centre.lat - 0.06, centre.lon + 0.12, centre.lat + 0.06)
 
-# COMMAND ----------
-
-spark.sql(f"""
-    CREATE OR REPLACE TEMPORARY VIEW local_hours AS
-    SELECT
-        hour(from_utc_timestamp(
-            make_timestamp(year(h.observation_date), month(h.observation_date),
-                           day(h.observation_date), h.hour_utc, 0, 0),
-            s.time_zone))                                               AS hour_local,
-        s.frc,
-        h.harmonic_speed_kph,
-        h.harmonic_speed_kph / s.speed_limit_kph                        AS share_of_limit
-    FROM {hourly} h
-    JOIN {segments} s USING (dseg_id)
-    WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
-      AND s.frc <= 4 AND s.speed_limit_kph > 0
-    """)
-
-by_hour = spark.sql("""
-        SELECT hour_local, cast(frc AS STRING) AS frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
-        FROM local_hours GROUP BY 1, 2 ORDER BY 1, 2
+major = spark.sql(f"""
+        SELECT geometry_wkt, frc, street_name, speed_limit_kph
+        FROM {segments}
+        WHERE frc <= 3
+          AND max_lon >= {AREA[0]} AND min_lon <= {AREA[2]}
+          AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
+        LIMIT 4000
         """).toPandas()
 
-px.line(by_hour, x="hour_local", y="speed_kph", color="frc", markers=True,
-        labels=dict(hour_local="local hour", speed_kph="harmonic speed, km/h", frc="class"),
-        title=f"Speed by local hour and road class, {region}").show()
+chart = basemap(centre.lat, centre.lon, 12)
 
-mix = spark.sql("""
-        SELECT hour_local,
-               round(100.0 * avg(share_of_limit), 1)                    AS pct_of_speed_limit,
-               round(100.0 * avg(CASE WHEN frc <= 2 THEN 1 ELSE 0 END), 1)
-                                                                        AS pct_rows_on_frc_0_to_2
-        FROM local_hours GROUP BY hour_local ORDER BY hour_local
-        """).toPandas()
-
-px.line(mix.melt("hour_local", var_name="measure", value_name="pct"), x="hour_local", y="pct",
-        facet_row="measure", markers=True, labels=dict(hour_local="local hour", pct="%"),
-        title="Speed as a share of the limit, and the class mix behind it").update_yaxes(matches=None).show()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 4. Three signals from the percentile array
-# MAGIC
-# MAGIC Percentiles show more than the average speed.
-# MAGIC
-# MAGIC **Speeding** means p85 is above the posted limit. This shows where speeding is common.
-# MAGIC
-# MAGIC **Congestion** means the harmonic mean is below 60% of the limit. Low speeds and dense
-# MAGIC traffic can lead to more crashes.
-# MAGIC
-# MAGIC **Variability** is the standard deviation divided by the mean. It shows stop-and-go traffic,
-# MAGIC even when the average speed looks normal.
-# MAGIC
-# MAGIC The array has 19 values, from p5 to p95 in steps of 5. p85 is the 17th value.
-# MAGIC `element_at` starts counting at 1. The `arr[i]` form starts at 0 and would return p80.
-# MAGIC
-# MAGIC Hours with a single observation have no array. They stay in the view: the mean counts
-# MAGIC towards speed and congestion, the speeding rate is taken over the hours that have a
-# MAGIC distribution, and `single_observation_pct` says how much of each segment rests on one
-# MAGIC vehicle.
-
-# COMMAND ----------
-
-spark.sql(f"""
-    CREATE OR REPLACE TEMPORARY VIEW segment_metrics AS
-    WITH flagged AS (
-        SELECT
-            h.dseg_id,
-            h.harmonic_speed_kph,
-            h.stddev_speed_kph,
-            s.frc,
-            s.length_m,
-            CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
-                 WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
-                 THEN 1 ELSE 0 END                                  AS speeding,
-            CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph
-                 THEN 1 ELSE 0 END                                  AS congested,
-            CASE WHEN h.speed_percentiles_kph IS NULL THEN 1 ELSE 0 END
-                                                                    AS single_observation
-        FROM {hourly} h
-        JOIN {segments} s USING (dseg_id)
-        WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
-          AND s.speed_limit_kph > 0
-          AND h.harmonic_speed_kph > 0
-    )
-    SELECT
-        dseg_id,
-        any_value(frc)                                              AS frc,
-        any_value(length_m)                                         AS length_m,
-        count(*)                                                    AS hours_measured,
-        round(avg(harmonic_speed_kph), 2)                           AS avg_speed_kph,
-        round(avg(stddev_speed_kph) / avg(harmonic_speed_kph), 3)   AS variability,
-        round(100.0 * avg(speeding), 1)                             AS speeding_pct,
-        round(100.0 * avg(congested), 1)                            AS congestion_pct,
-        round(100.0 * avg(single_observation), 1)                   AS single_observation_pct
-    FROM flagged
-    GROUP BY dseg_id
-    HAVING count(*) >= 24 AND count(speeding) > 0
-    """)
-
-signals = spark.sql("""
-        SELECT cast(frc AS STRING) AS frc, count(*) AS segments,
-               round(avg(speeding_pct), 1)           AS speeding,
-               round(avg(congestion_pct), 1)         AS congested,
-               round(avg(single_observation_pct), 1) AS single_observation,
-               round(avg(variability), 3)            AS avg_variability
-        FROM segment_metrics GROUP BY frc ORDER BY frc
-        """).toPandas()
-
-px.bar(signals.melt("frc", ["speeding", "congested", "single_observation"], "signal", "pct_of_hours"),
-       x="frc", y="pct_of_hours", color="signal", barmode="group",
-       labels=dict(frc="road class", pct_of_hours="% of measured hours", signal=""),
-       title=f"How often each signal fires, by road class, {region}").show()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 5. One segment's day
-# MAGIC
-# MAGIC The array is easiest to read on a single road. Below is the most variable motorway or
-# MAGIC trunk segment of the day with a full set of arrays: the band runs from p5 to p95, so its
-# MAGIC width is the spread of speeds in that hour, and the dashed line is the posted limit.
-
-# COMMAND ----------
-
-pick = spark.sql("""
-        SELECT dseg_id FROM segment_metrics
-        WHERE frc <= 1 AND single_observation_pct = 0
-        ORDER BY variability DESC LIMIT 1
-        """).first().dseg_id
-
-day = spark.sql(f"""
-        SELECT hour(from_utc_timestamp(make_timestamp(year(h.observation_date), month(h.observation_date),
-                                                      day(h.observation_date), h.hour_utc, 0, 0), s.time_zone)) AS hour_local,
-               element_at(h.speed_percentiles_kph, 1) AS p5, element_at(h.speed_percentiles_kph, 10) AS p50,
-               element_at(h.speed_percentiles_kph, 19) AS p95, h.harmonic_speed_kph, s.speed_limit_kph,
-               any_value(s.street_name) OVER () AS street_name, any_value(s.frc) OVER () AS frc
-        FROM {hourly} h JOIN {segments} s USING (dseg_id)
-        WHERE h.dseg_id = '{pick}' AND h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
-        ORDER BY hour_local
-        """).toPandas()
-
-go.Figure([
-    go.Scatter(x=day.hour_local, y=day.p95, line=dict(width=0), showlegend=False, hoverinfo="skip"),
-    go.Scatter(x=day.hour_local, y=day.p5, fill="tonexty", line=dict(width=0), name="p5 to p95",
-               fillcolor="rgba(99, 110, 250, 0.2)"),
-    go.Scatter(x=day.hour_local, y=day.p50, name="median"),
-    go.Scatter(x=day.hour_local, y=day.harmonic_speed_kph, name="harmonic mean"),
-    go.Scatter(x=day.hour_local, y=day.speed_limit_kph, name="speed limit", line=dict(dash="dash", color="grey")),
-]).update_layout(title=f"{day.street_name[0] or 'unnamed'}, class {day.frc[0]}, {date_from}",
-                 xaxis_title="local hour", yaxis_title="km/h").show()
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 6. Joining on H3 cells
-# MAGIC
-# MAGIC Road segments can be hard to join with address and journey data. Their boundaries
-# MAGIC are arbitrary. `segments.h3_r9` stores the segment centroid's
-# MAGIC [H3](https://h3geo.org/) cell at resolution 9, about 174 m across. Add the same cell
-# MAGIC to your points, then join on it.
-# MAGIC
-# MAGIC Weight results by length. A 2 km motorway section should count more than a 30 m slip
-# MAGIC road. Below, the cells where congestion takes the largest share of the measured hours.
-
-# COMMAND ----------
-
-display(spark.sql(f"""
-        SELECT
-            s.h3_r9,
-            count(*)                                                        AS segments,
-            round(sum(m.congestion_pct * m.length_m) / sum(m.length_m), 1)  AS congestion_pct_by_length,
-            round(sum(m.speeding_pct * m.length_m) / sum(m.length_m), 1)    AS speeding_pct_by_length,
-            round(sum(m.length_m) / 1000, 2)                                AS network_km
-        FROM segment_metrics m
-        JOIN {segments} s USING (dseg_id)
-        GROUP BY s.h3_r9
-        HAVING count(*) >= 3
-        ORDER BY congestion_pct_by_length DESC
-        LIMIT 25
-        """))
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 7. Map the results
-# MAGIC
-# MAGIC Geometry is a WKT LineString in EPSG:4326. The map draws the major roads in the box that
-# MAGIC spend the largest share of the day congested. Set `AREA` to a region in your extract.
-
-# COMMAND ----------
-
-# Centred on where the region's segments are
-centre = spark.sql(
-    f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}"
-).first()
-AREA = (centre.lon - 0.15, centre.lat - 0.065, centre.lon + 0.15, centre.lat + 0.065)
-
-# Each segment becomes its own SVG path with its own tooltip, so we limit the rendered segments
-MAX_SEGMENTS_ON_MAP = 1500
-
-busy = spark.sql(f"""
-    SELECT s.geometry_wkt, s.street_name, s.frc, m.congestion_pct, m.avg_speed_kph,
-           m.speeding_pct
-    FROM segment_metrics m
-    JOIN {segments} s USING (dseg_id)
-    WHERE s.frc <= 4 AND m.congestion_pct > 0
-      AND s.max_lon >= {AREA[0]} AND s.min_lon <= {AREA[2]}
-      AND s.max_lat >= {AREA[1]} AND s.min_lat <= {AREA[3]}
-    ORDER BY m.congestion_pct DESC
-    LIMIT {MAX_SEGMENTS_ON_MAP}
-    """).toPandas()
-
-print(f"{len(busy):,} most congested major road segments in that box")
-
-if len(busy):
-    chart = folium.Map(
-        location=((AREA[1] + AREA[3]) / 2, (AREA[0] + AREA[2]) / 2),
-        zoom_start=12,
-        tiles="OpenStreetMap",
-    )
-    chart.get_root().header.add_child(
-        folium.Element(
-            "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}"
-            "</style>"
-        )
-    )
-    shade = mcolors.Normalize(vmin=0, vmax=busy.congestion_pct.max())
-
-    for row in busy.itertuples():
+for frc, color in {0: "red", 1: "darkorange", 2: "blue", 3: "green"}.items():
+    subset = major[major.frc == frc]
+    group = folium.FeatureGroup(name=f"FRC {frc} ({len(subset):,} segments)")
+    for row in subset.itertuples():
         folium.PolyLine(
             [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
-            color=mcolors.to_hex(cm.YlOrRd(shade(row.congestion_pct))),
-            weight=3,
-            opacity=0.85,
-            tooltip=(
-                f"{row.street_name or 'unnamed'}, class {row.frc}, "
-                f"congested in {row.congestion_pct:.0f}% of hours, {row.avg_speed_kph:.0f} km/h, "
-                f"speeding in {row.speeding_pct:.0f}% of hours"
-            ),
-        ).add_to(chart)
-    display(chart)
-else:
-    print("Nothing in that box. Widen AREA or check it against the extent above.")
+            color=color, weight=2 if frc <= 1 else 1, opacity=0.7,
+            tooltip=f"{row.street_name or 'unnamed'} (FRC {frc}, {row.speed_limit_kph} km/h)",
+        ).add_to(group)
+    group.add_to(chart)
+
+folium.LayerControl().add_to(chart)
+display(chart)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Coverage: which roads report, and when
+# MAGIC
+# MAGIC A road can be on the map without a probe vehicle ever using it. Coverage falls with road
+# MAGIC class, because small roads carry less traffic, and it falls at night for the same reason.
+# MAGIC
+# MAGIC The two lines are different things. **Reporting** is the share of segments that produced
+# MAGIC any measurement in that hour. **Single observation** is the share of the measurements
+# MAGIC that rest on one vehicle, which is where `speed_percentiles_kph` comes back null. Both
+# MAGIC matter before you trust a number: the first says whether the road is represented at all,
+# MAGIC the second says how much weight the reading carries.
+
+# COMMAND ----------
+
+by_frc = spark.sql(f"""
+        WITH observed AS (SELECT dseg_id, count(*) AS hours FROM measured GROUP BY dseg_id)
+        SELECT s.frc, count(*) AS segments, round(sum(s.length_m) / 1000) AS network_km,
+               round(avg(s.speed_limit_kph), 1)              AS avg_speed_limit_kph,
+               round(100.0 * count(o.dseg_id) / count(*), 1) AS pct_with_measurements,
+               round(avg(o.hours), 1)                        AS avg_hours_measured
+        FROM {segments} s LEFT JOIN observed o USING (dseg_id)
+        GROUP BY s.frc ORDER BY s.frc
+        """).toPandas()
+
+display(by_frc)
+
+active = spark.sql("SELECT count(DISTINCT dseg_id) AS n FROM measured").first().n
+by_hour = spark.sql(f"""
+        SELECT hour_utc,
+               round(100.0 * count(DISTINCT dseg_id) / {active}, 1) AS pct_reporting,
+               round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
+                   AS pct_single_observation
+        FROM measured GROUP BY hour_utc ORDER BY hour_utc
+        """).toPandas()
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
+
+ax1.bar(by_frc.frc, by_frc.pct_with_measurements,
+        color=[FRC_COLORS.get(f, "#999") for f in by_frc.frc])
+ax1.set_title("Segments with any measurement, by road class")
+ax1.set_xlabel("FRC (0 = motorway, 7 = local)")
+ax1.set_ylabel("% of segments")
+for f, v in zip(by_frc.frc, by_frc.pct_with_measurements):
+    ax1.text(f, v, f"{v:.0f}%", ha="center", va="bottom", fontsize=8)
+
+ax2.plot(by_hour.hour_utc, by_hour.pct_reporting, marker="o", color="steelblue", label="Reporting")
+ax2.plot(by_hour.hour_utc, by_hour.pct_single_observation, marker="o", color="coral",
+         label="Resting on one vehicle")
+ax2.set_title("Coverage through the day")
+ax2.set_xlabel("Hour (UTC)")
+ax2.set_ylabel("% of active segments / of rows")
+ax2.set_xticks(range(0, 24, 2))
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Speed distributions
+# MAGIC
+# MAGIC Three views. The first is every measured segment-hour in the window, which is bimodal:
+# MAGIC urban traffic around 30 km/h and free-flowing major roads well above it. The second
+# MAGIC separates that by road class, from a sample small enough to estimate a density on. The
+# MAGIC third compares the three averages the data carries.
+# MAGIC
+# MAGIC The harmonic mean sits below the arithmetic mean, and that is the point of it. Averaging
+# MAGIC speeds over-weights the fast vehicles; averaging the time they take does not. Use the
+# MAGIC harmonic mean for anything that becomes a travel time.
+
+# COMMAND ----------
+
+speeds = histogram("measured", "avg_speed_kph", 0, 150, bins=60)
+sample = spark.sql("""
+        SELECT frc, least(avg_speed_kph, 150) AS avg_speed_kph FROM measured
+        WHERE frc <= 4 AND rand() < 0.02 LIMIT 150000
+        """).toPandas()
+metrics = spark.sql("""
+        SELECT round(avg(avg_speed_kph), 1)      AS arithmetic,
+               round(avg(median_speed_kph), 1)   AS median,
+               round(avg(harmonic_speed_kph), 1) AS harmonic
+        FROM measured
+        """).toPandas().iloc[0]
+
+fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+
+axes[0].bar(speeds.value, speeds.rows, width=2.3, color="steelblue")
+axes[0].set_title(f"Average speed, all {speeds.rows.sum():,} segment-hours")
+axes[0].set_xlabel("km/h")
+axes[0].set_ylabel("Segment-hours")
+
+for frc in sorted(sample.frc.unique()):
+    sns.kdeplot(sample.avg_speed_kph[sample.frc == frc], ax=axes[1], label=f"FRC {frc}",
+                color=FRC_COLORS.get(frc), alpha=0.8)
+axes[1].set_title("Speed by road class (2% sample)")
+axes[1].set_xlabel("km/h")
+axes[1].set_xlim(0, 150)
+axes[1].legend(fontsize=8)
+
+axes[2].bar(metrics.index, metrics.values, color=["steelblue", "coral", "seagreen"])
+axes[2].set_title("The three averages compared")
+axes[2].set_ylabel("km/h")
+for i, v in enumerate(metrics.values):
+    axes[2].text(i, v, f"{v:.1f}", ha="center", va="bottom")
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 5. What the percentile array adds
+# MAGIC
+# MAGIC `speed_percentiles_kph` holds 19 values, p5 to p95 in steps of 5, for every segment-hour
+# MAGIC that saw more than one vehicle. `element_at` counts from 1, so p85 is `element_at(arr, 17)`;
+# MAGIC the `arr[16]` form counts from 0 and would give you p80.
+# MAGIC
+# MAGIC The curve on the left is the average shape of that distribution. It is not a straight
+# MAGIC line: the gap between p5 and p25 is much wider than the gap between p50 and p70, which is
+# MAGIC the signature of a few very slow vehicles in an otherwise free-flowing hour.
+# MAGIC
+# MAGIC The right panel turns the array into a congestion measure that needs no speed limit. For
+# MAGIC each segment it compares the slow tail of the peak (p15 at 07:00 to 09:00 and 16:00 to
+# MAGIC 18:00) with the free-flowing night (p85 between 22:00 and 05:00). A ratio near 1 means
+# MAGIC the peak is as free as the night. Everything left of the dashed line is a road that slows
+# MAGIC down when it is busy.
+
+# COMMAND ----------
+
+curve = spark.sql("""
+        SELECT pos + 1 AS position, round(avg(value), 1) AS speed_kph
+        FROM measured LATERAL VIEW posexplode(speed_percentiles_kph) t AS pos, value
+        WHERE speed_percentiles_kph IS NOT NULL
+        GROUP BY pos ORDER BY pos
+        """).toPandas()
+
+spark.sql("""
+    CREATE OR REPLACE TEMP VIEW congestion_ratio AS
+    SELECT dseg_id,
+           avg(CASE WHEN hour_utc BETWEEN 7 AND 9 OR hour_utc BETWEEN 16 AND 18
+                    THEN element_at(speed_percentiles_kph, 3) END)  AS peak_p15,
+           avg(CASE WHEN hour_utc >= 22 OR hour_utc <= 5
+                    THEN element_at(speed_percentiles_kph, 17) END) AS night_p85
+    FROM measured GROUP BY dseg_id
+    """)
+
+ratios = histogram("congestion_ratio", "peak_p15 / night_p85", 0, 2, bins=50,
+                   where="night_p85 > 0 AND peak_p15 IS NOT NULL")
+median_ratio = spark.sql("""
+        SELECT round(percentile_approx(peak_p15 / night_p85, 0.5), 2) AS m
+        FROM congestion_ratio WHERE night_p85 > 0 AND peak_p15 IS NOT NULL
+        """).first().m
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
+
+ax1.plot(curve.position, curve.speed_kph, marker="o", color="steelblue", linewidth=2)
+ax1.fill_between(curve.position, curve.speed_kph, alpha=0.2, color="steelblue")
+ax1.set_title("Average speed percentile curve")
+ax1.set_xlabel("Percentile")
+ax1.set_ylabel("km/h")
+ax1.set_xticks(curve.position)
+ax1.set_xticklabels([f"p{p}" for p in range(5, 100, 5)], rotation=45)
+
+ax2.bar(ratios.value, ratios.rows, width=0.036, color="coral")
+ax2.axvline(1.0, color="black", linestyle="--", alpha=0.6, label="No slowdown")
+ax2.axvline(median_ratio, color="red", label=f"Median: {median_ratio:.2f}")
+ax2.set_title("Congestion severity: peak p15 over night p85")
+ax2.set_xlabel("Speed ratio (lower is more congested)")
+ax2.set_ylabel("Segments")
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 6. Speed and speeding through the day
+# MAGIC
+# MAGIC Hours are UTC in the data and local time in these charts, converted with
+# MAGIC `segments.time_zone`. The shaded bands are the commute peaks.
+# MAGIC
+# MAGIC Read the left chart per road class, not across classes. The set of segments that report
+# MAGIC changes through the day: at night the mix tilts towards motorways, by day towards local
+# MAGIC streets, so a single all-class line would fall in the morning largely because different
+# MAGIC roads started reporting.
+# MAGIC
+# MAGIC Speeding here means **p85 above the posted limit**, an hour in which the faster sixth of
+# MAGIC traffic is over the limit rather than one unusual vehicle. It peaks where congestion does
+# MAGIC not: at night, and on the fastest classes.
+
+# COMMAND ----------
+
+by_class_hour = spark.sql("""
+        SELECT hour_local, frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
+        FROM measured WHERE frc <= 4 AND speed_limit_kph > 0
+        GROUP BY 1, 2 ORDER BY 1, 2
+        """).toPandas()
+
+speeding = spark.sql("""
+        SELECT hour_local, frc, is_weekend,
+               round(100.0 * avg(CASE WHEN element_at(speed_percentiles_kph, 17) > speed_limit_kph
+                                      THEN 1.0 ELSE 0.0 END), 1) AS speeding_pct
+        FROM measured
+        WHERE speed_limit_kph > 0 AND speed_percentiles_kph IS NOT NULL
+        GROUP BY 1, 2, 3
+        """).toPandas()
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
+
+for frc in sorted(by_class_hour.frc.unique()):
+    subset = by_class_hour[by_class_hour.frc == frc]
+    ax1.plot(subset.hour_local, subset.speed_kph, marker="o", markersize=3,
+             color=FRC_COLORS.get(frc), label=f"FRC {frc}")
+ax1.axvspan(7, 9, alpha=0.1, color="red")
+ax1.axvspan(16, 18, alpha=0.1, color="orange")
+ax1.set_title("Harmonic speed by local hour and road class")
+ax1.set_xlabel("Local hour (shaded: commute peaks)")
+ax1.set_ylabel("km/h")
+ax1.set_xticks(range(0, 24, 2))
+ax1.legend(fontsize=8)
+
+for weekend, color, label in [(False, "steelblue", "Weekday"), (True, "coral", "Weekend")]:
+    subset = speeding[speeding.is_weekend == weekend].groupby("hour_local").speeding_pct.mean()
+    if not subset.empty:
+        ax2.plot(subset.index, subset.values, marker="o", color=color, linewidth=2, label=label)
+ax2.set_title("Hours with p85 above the limit")
+ax2.set_xlabel("Local hour")
+ax2.set_ylabel("% of measured hours")
+ax2.set_xticks(range(0, 24, 2))
+ax2.legend()
+
+plt.tight_layout()
+plt.show()
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4.5), gridspec_kw={"width_ratios": [2, 1]})
+
+grid = by_class_hour.pivot(index="frc", columns="hour_local", values="speed_kph")
+sns.heatmap(grid, ax=ax1, cmap="RdYlGn", cbar_kws={"label": "km/h"},
+            yticklabels=[f"FRC {f}: {FRC_LABELS.get(f, '')}" for f in grid.index])
+ax1.set_title("Speed by road class and local hour")
+ax1.set_xlabel("Local hour")
+ax1.set_ylabel("")
+
+by_frc_speeding = speeding.groupby("frc").speeding_pct.mean()
+ax2.bar(by_frc_speeding.index, by_frc_speeding.values,
+        color=[FRC_COLORS.get(f, "#999") for f in by_frc_speeding.index])
+ax2.set_title("Speeding prevalence by road class")
+ax2.set_xlabel("FRC (0 = motorway, 7 = local)")
+ax2.set_ylabel("% of measured hours")
+
+plt.tight_layout()
+plt.show()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 7. Joining on H3 cells
+# MAGIC
+# MAGIC Road segments are hard to join with address and journey data, because their boundaries
+# MAGIC are arbitrary. `segments.h3_r9` stores the segment centroid's [H3](https://h3geo.org/)
+# MAGIC cell at resolution 9, about 174 m across. Put the same cell on your own points and the
+# MAGIC join is one string comparison.
+# MAGIC
+# MAGIC Weight by length when you aggregate. A 2 km motorway section should not count the same
+# MAGIC as a 30 m slip road. The cells below are the ones that spend most of the day congested,
+# MAGIC taking congestion as an hour below 60% of the posted limit.
+
+# COMMAND ----------
+
+display(spark.sql("""
+        WITH per_segment AS (
+            SELECT dseg_id, any_value(h3_r9) AS h3_r9, any_value(length_m) AS length_m,
+                   100.0 * avg(CASE WHEN harmonic_speed_kph < 0.6 * speed_limit_kph
+                                    THEN 1.0 ELSE 0.0 END) AS congestion_pct,
+                   100.0 * avg(CASE WHEN element_at(speed_percentiles_kph, 17) > speed_limit_kph
+                                    THEN 1.0 ELSE 0.0 END) AS speeding_pct
+            FROM measured WHERE speed_limit_kph > 0
+            GROUP BY dseg_id HAVING count(speed_percentiles_kph) > 0
+        )
+        SELECT h3_r9, count(*) AS segments,
+               round(sum(congestion_pct * length_m) / sum(length_m), 1) AS congestion_pct_by_length,
+               round(sum(speeding_pct * length_m) / sum(length_m), 1)   AS speeding_pct_by_length,
+               round(sum(length_m) / 1000, 2)                           AS network_km
+        FROM per_segment GROUP BY h3_r9 HAVING count(*) >= 3
+        ORDER BY congestion_pct_by_length DESC LIMIT 25
+        """))
 
 # COMMAND ----------
 

@@ -14,8 +14,9 @@
 # MAGIC
 # MAGIC Both need the same two ingredients. **Volume** is exposure: how many vehicles are there
 # MAGIC to collide with. **Speed** is severity and behaviour: how fast, how erratic, how often
-# MAGIC above the limit. Neither alone is a risk model, so the story runs exposure, then
-# MAGIC severity, then the two combined, then the same recipe on one route.
+# MAGIC above the limit. Neither alone is a risk model, so the notebook runs in that order:
+# MAGIC exposure, then severity, then one score, then what the score hides, then the map, then
+# MAGIC the same recipe on a single route.
 # MAGIC
 # MAGIC ## What you need
 # MAGIC
@@ -30,17 +31,29 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install folium==0.20.0 h3==4.5.0
+# MAGIC %pip install folium==0.20.0 h3==4.5.0 shapely==2.1.2
 
 # COMMAND ----------
 
 import folium
+import h3
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import plotly.express as px
-from h3 import cell_to_boundary, cell_to_latlng
+import matplotlib.pyplot as plt
+import seaborn as sns
+from shapely import wkt
 
-px.defaults.template = "plotly_white"
+sns.set_theme(style="whitegrid", palette="colorblind")
+
+
+def basemap(lat, lon, zoom):
+    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
+    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
+    ))
+    return chart
+
 
 # COMMAND ----------
 
@@ -80,7 +93,7 @@ for schema in (stats, volumes):
 # MAGIC spatial index is needed.
 # MAGIC
 # MAGIC Exposure is **vehicle-kilometres per day**: `aadt` times `length_m`, summed over the cell.
-# MAGIC A road drawn as ten segments counts once, and a cell with a motorway and three side
+# MAGIC A road drawn as ten segments counts once, and a cell holding a motorway and three side
 # MAGIC streets reads as busy, which an average of AADT would hide.
 
 # COMMAND ----------
@@ -144,11 +157,11 @@ spark.sql(f"""
 
 display(spark.sql("""
         SELECT count(*) AS cells,
-               round(avg(mean_speed_kph), 1)              AS mean_speed_kph,
-               round(avg(variability), 3)                 AS mean_variability,
-               round(100 * avg(speeding_rate), 1)         AS mean_speeding_pct,
-               round(100 * avg(congestion_rate), 1)       AS mean_congestion_pct,
-               round(100 * avg(single_observation_rate), 1) AS mean_single_observation_pct
+               round(avg(mean_speed_kph), 1)                 AS mean_speed_kph,
+               round(avg(variability), 3)                    AS mean_variability,
+               round(100 * avg(speeding_rate), 1)            AS mean_speeding_pct,
+               round(100 * avg(congestion_rate), 1)          AS mean_congestion_pct,
+               round(100 * avg(single_observation_rate), 1)  AS mean_single_observation_pct
         FROM severity
         """))
 
@@ -160,12 +173,14 @@ display(spark.sql("""
 # MAGIC Each factor is scaled from 0 to 1 across the cells in this extract, weighted, and summed.
 # MAGIC Exposure takes the largest weight because a collision needs traffic before it needs
 # MAGIC speed. **The weights are illustrative.** Calibrate them with your claims history. The
-# MAGIC scaling is relative to this extract, so scores rank cells within it and cannot be compared
-# MAGIC across releases.
+# MAGIC scaling is relative to this extract, so scores rank cells within it and cannot be
+# MAGIC compared across releases.
 # MAGIC
-# MAGIC The weighted contributions stay as columns, so the chart can show what lifts each of the
-# MAGIC top cells: mostly exposure for the urban ones, mostly speed and speeding for the
-# MAGIC motorway ones.
+# MAGIC The four factor panels say why the scaling matters. Exposure is heavily skewed, a long
+# MAGIC tail of a few very busy cells, so on a linear scale almost every cell scores near zero on
+# MAGIC that term; speeding and congestion are closer to uniform. A factor that is skewed
+# MAGIC contributes almost nothing to the ranking of ordinary cells, which is an argument for
+# MAGIC ranking or log-scaling the exposure term before you weight it.
 
 # COMMAND ----------
 
@@ -201,26 +216,85 @@ spark.sql("""
            round(100 * single_observation_rate, 1) AS single_observation_pct,
            round(exposure_part + speed_part + variability_part + speeding_part + congestion_part, 3)
                                                    AS risk_score,
-           round(exposure_part, 3) AS exposure_part, round(speed_part, 3) AS speed_part,
-           round(variability_part, 3) AS variability_part, round(speeding_part, 3) AS speeding_part,
-           round(congestion_part, 3) AS congestion_part
+           round(exposure_part, 3)    AS exposure_part,
+           round(speed_part, 3)       AS speed_part,
+           round(variability_part, 3) AS variability_part,
+           round(speeding_part, 3)    AS speeding_part,
+           round(congestion_part, 3)  AS congestion_part
     FROM weighted
     """)
 
-top = spark.sql("SELECT * FROM territory_risk ORDER BY risk_score DESC LIMIT 15").toPandas()
+# One row per scored cell. Everything below is drawn from this frame.
+cells = spark.sql("SELECT * FROM territory_risk").toPandas()
+print(f"{len(cells):,} scored cells in {region} on {observation_date}")
 
-display(top.iloc[:, :8])
-px.bar(top.melt(["h3_r9", "mean_speed_kph"], [c for c in top.columns if c.endswith("_part")], "factor", "contribution"),
-       x="h3_r9", y="contribution", color="factor", hover_data=["mean_speed_kph"],
-       labels=dict(h3_r9="cell", contribution="weighted contribution to the score", factor=""),
-       title=f"What lifts the 15 highest-scoring cells, {region}").update_xaxes(categoryorder="total descending").show()
+display(spark.sql("""
+        SELECT h3_r9, vehicle_km_per_day, mean_speed_kph, variability, speeding_pct,
+               congestion_pct, single_observation_pct, risk_score
+        FROM territory_risk ORDER BY risk_score DESC LIMIT 15
+        """))
+
+# COMMAND ----------
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 8))
+
+panels = [
+    ("vehicle_km_per_day", "Exposure (vehicle-km per day)", "steelblue", True),
+    ("variability", "Speed variability (std / mean)", "mediumpurple", False),
+    ("speeding_pct", "Hours with p85 above the limit (%)", "coral", False),
+    ("congestion_pct", "Hours below 60% of the limit (%)", "seagreen", False),
+]
+for ax, (column, title, color, log) in zip(axes.flat, panels):
+    values = cells[column].clip(upper=cells[column].quantile(0.99))
+    ax.hist(values, bins=50, color=color, edgecolor="white")
+    ax.set_title(title)
+    if log:
+        ax.set_yscale("log")
+        ax.set_ylabel("Cells (log scale)")
+    else:
+        ax.set_ylabel("Cells")
+
+plt.suptitle(f"The four factors across {len(cells):,} cells, 99th percentile clipped",
+             fontsize=13, fontweight="bold")
+plt.tight_layout()
+plt.show()
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
+
+ax1.hist(cells.risk_score, bins=60, color="crimson", edgecolor="white")
+ax1.axvline(cells.risk_score.median(), color="black", linestyle="--",
+            label=f"Median: {cells.risk_score.median():.2f}")
+ax1.axvline(cells.risk_score.quantile(0.95), color="darkred",
+            label=f"95th percentile: {cells.risk_score.quantile(0.95):.2f}")
+ax1.set_title("Composite risk score")
+ax1.set_xlabel("Score (0 lowest, 1 highest)")
+ax1.set_ylabel("Cells")
+ax1.legend()
+
+top = cells.nlargest(15, "risk_score")
+parts = [c for c in cells.columns if c.endswith("_part")]
+bottom = [0] * len(top)
+for part, color in zip(parts, ["#800026", "#e31a1c", "#fd8d3c", "#feb24c", "#ffeda0"]):
+    ax2.bar(range(len(top)), top[part], bottom=bottom, color=color,
+            label=part.replace("_part", ""))
+    bottom = [b + v for b, v in zip(bottom, top[part])]
+ax2.set_xticks(range(len(top)))
+ax2.set_xticklabels([f"{s:.0f}" for s in top.mean_speed_kph])
+ax2.set_xlabel("The 15 highest-scoring cells, labelled by mean speed in km/h")
+ax2.set_ylabel("Weighted contribution")
+ax2.set_title("What lifts the top cells")
+ax2.legend(fontsize=8)
+
+plt.tight_layout()
+plt.show()
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 4. Two kinds of risky cell
 # MAGIC
-# MAGIC Two very different types of cell score highly:
+# MAGIC The stacked bars above already show it: some top cells are lifted by exposure, others by
+# MAGIC speed and speeding. They are two different risks wearing one number.
 # MAGIC
 # MAGIC - **Dense and slow.** Central cells carry the most vehicle-kilometres at 15 to 25 km/h.
 # MAGIC   Exposure is high, but each event is less severe.
@@ -228,12 +302,10 @@ px.bar(top.melt(["h3_r9", "mean_speed_kph"], [c for c in top.columns if c.endswi
 # MAGIC   above the limit in almost every hour, with very little congestion. Exposure per cell is
 # MAGIC   lower, but each event is more severe.
 # MAGIC
-# MAGIC Claims frequency and claims severity models weight these differently, so in practice score
-# MAGIC them separately rather than as one number. Keeping the factor columns makes that possible.
-# MAGIC
-# MAGIC The breakdown uses the full extract: motorway cells speed about twice as often as urban
-# MAGIC cells and congest twenty times less. The scatter samples 5,000 cells, with the score as
-# MAGIC colour, and the two types sit at opposite ends of the speed axis.
+# MAGIC Claims frequency and claims severity models weight these differently, so in practice
+# MAGIC score them separately rather than as one number. Keeping the factor columns makes that
+# MAGIC possible. In the scatter the two types sit at opposite ends of the speed axis, and the
+# MAGIC colour shows that the single score rates both highly.
 
 # COMMAND ----------
 
@@ -254,79 +326,96 @@ display(spark.sql("""
         ORDER BY mean_speed_kph DESC
         """))
 
-sample = spark.sql("""
-        SELECT vehicle_km_per_day, mean_speed_kph, speeding_pct, congestion_pct, risk_score
-        FROM territory_risk WHERE vehicle_km_per_day > 0 ORDER BY rand() LIMIT 5000
-        """).toPandas()
+sample = cells[cells.vehicle_km_per_day > 0].sample(min(8000, len(cells)), random_state=0)
 
-px.scatter(sample, x="mean_speed_kph", y="vehicle_km_per_day", color="risk_score", log_y=True, opacity=0.6,
-           color_continuous_scale="YlOrRd", hover_data=["speeding_pct", "congestion_pct"],
-           labels=dict(mean_speed_kph="mean speed, km/h", vehicle_km_per_day="vehicle-km per day", risk_score="score"),
-           title=f"Exposure against speed for 5,000 sampled cells, {region}").show()
+fig, ax = plt.subplots(figsize=(11, 6))
+points = ax.scatter(sample.mean_speed_kph, sample.vehicle_km_per_day, c=sample.risk_score,
+                    cmap="YlOrRd", s=6, alpha=0.5)
+ax.set_yscale("log")
+ax.set_xlabel("Mean speed (km/h)")
+ax.set_ylabel("Vehicle-km per day (log scale)")
+ax.set_title(f"Exposure against speed, {len(sample):,} sampled cells in {region}",
+             fontsize=13, fontweight="bold")
+ax.axvline(40, color="grey", linestyle=":", alpha=0.7)
+ax.axvline(80, color="grey", linestyle=":", alpha=0.7)
+ax.text(20, sample.vehicle_km_per_day.max(), "urban", ha="center", fontsize=9, color="grey")
+ax.text(60, sample.vehicle_km_per_day.max(), "arterial", ha="center", fontsize=9, color="grey")
+ax.text(100, sample.vehicle_km_per_day.max(), "motorway", ha="center", fontsize=9, color="grey")
+fig.colorbar(points, ax=ax, label="Risk score")
+plt.tight_layout()
+plt.show()
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 5. The map
 # MAGIC
-# MAGIC Resolution 9 is right for scoring and too fine for a map: this extract has about 224,000
-# MAGIC scored cells, and the notebook renders a few hundred polygons comfortably. Resolution 6
-# MAGIC cells are about 36 km² and cover the extract with about 2,000 hexagons.
+# MAGIC Resolution 9 is right for scoring and too fine for a map of a whole region: this extract
+# MAGIC has hundreds of thousands of scored cells, and a browser renders a few thousand polygons
+# MAGIC comfortably. Rolling up to resolution 6, about 36 km² per hexagon, covers the extract
+# MAGIC with roughly two thousand.
 # MAGIC
-# MAGIC Each hexagon takes the exposure-weighted mean of its children's scores, so it shows the
-# MAGIC risk vehicles actually face rather than treating an empty lane like a motorway. Colour is
-# MAGIC by rank, because exposure is skewed and a linear scale would leave most cells pale.
+# MAGIC Each hexagon takes the **exposure-weighted** mean of its children's scores, so it shows
+# MAGIC the risk vehicles actually meet rather than treating an empty lane like a motorway.
+# MAGIC Colour is by rank, because exposure is skewed and a linear scale would leave almost every
+# MAGIC hexagon the same pale shade. Switch the layer to see the scored cells at full resolution
+# MAGIC around the busiest point.
 
 # COMMAND ----------
 
 MAP_RESOLUTION = 6
 
-area = spark.sql(f"""
-    SELECT h3_toparent(h3_r9, {MAP_RESOLUTION})                                        AS cell,
-           sum(vehicle_km_per_day)                                                     AS vehicle_km_per_day,
-           round(sum(risk_score * vehicle_km_per_day) / sum(vehicle_km_per_day), 3)     AS risk_score,
-           round(sum(mean_speed_kph * vehicle_km_per_day) / sum(vehicle_km_per_day), 1) AS mean_speed_kph,
-           round(sum(speeding_pct * vehicle_km_per_day) / sum(vehicle_km_per_day), 1)   AS speeding_pct,
-           count(*)                                                                     AS cells_r9
-    FROM territory_risk
-    GROUP BY 1
-    """).toPandas()
+cells["parent"] = [h3.cell_to_parent(c, MAP_RESOLUTION) for c in cells.h3_r9]
+cells["weighted_score"] = cells.risk_score * cells.vehicle_km_per_day
 
-print(
-    f"{len(area):,} cells at resolution {MAP_RESOLUTION}, "
-    f"rolled up from {area.cells_r9.sum():,} scored cells"
-)
+area = cells.groupby("parent").agg(
+    vehicle_km_per_day=("vehicle_km_per_day", "sum"),
+    weighted_score=("weighted_score", "sum"),
+    mean_speed_kph=("mean_speed_kph", "mean"),
+    speeding_pct=("speeding_pct", "mean"),
+    cells_r9=("h3_r9", "count"),
+).reset_index()
+area["risk_score"] = area.weighted_score / area.vehicle_km_per_day
 
-centres = [cell_to_latlng(c) for c in area.cell]
-chart = folium.Map(
-    location=[
-        sum(c[0] for c in centres) / len(centres),
-        sum(c[1] for c in centres) / len(centres),
-    ],
-    zoom_start=9,
-    tiles="OpenStreetMap",
-)
-chart.get_root().header.add_child(
-    folium.Element(
-        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
-    )
-)
+print(f"{len(area):,} hexagons at resolution {MAP_RESOLUTION}, "
+      f"rolled up from {area.cells_r9.sum():,} scored cells")
 
+busiest = cells.nlargest(1, "vehicle_km_per_day").h3_r9.iloc[0]
+centre = h3.cell_to_latlng(busiest)
+
+chart = basemap(centre[0], centre[1], 9)
+shade = cm.YlOrRd
 rank = area.risk_score.rank(pct=True)
 
-for row, shade in zip(area.itertuples(), rank):
+overview = folium.FeatureGroup(name=f"Region, resolution {MAP_RESOLUTION}")
+for row, value in zip(area.itertuples(), rank):
+    color = mcolors.to_hex(shade(value))
     folium.Polygon(
-        locations=cell_to_boundary(row.cell),
-        color=None,
-        fill=True,
-        fill_color=mcolors.to_hex(cm.YlOrRd(shade)),
-        fill_opacity=0.55,
-        tooltip=(
-            f"score {row.risk_score:.2f}, {row.vehicle_km_per_day:,.0f} vehicle-km/day, "
-            f"{row.mean_speed_kph:.0f} km/h, speeding in {row.speeding_pct:.0f}% of hours"
-        ),
-    ).add_to(chart)
+        locations=h3.cell_to_boundary(row.parent),
+        color=color, fill=True, fill_color=color, fill_opacity=0.55, weight=1,
+        tooltip=(f"score {row.risk_score:.2f}, {row.vehicle_km_per_day:,.0f} vehicle-km/day, "
+                 f"{row.mean_speed_kph:.0f} km/h, speeding in {row.speeding_pct:.0f}% of hours, "
+                 f"{row.cells_r9} scored cells"),
+    ).add_to(overview)
+overview.add_to(chart)
 
+# The scored cells themselves, within 40 steps of the busiest one
+near = cells[cells.h3_r9.isin(set(h3.grid_disk(busiest, 40)))]
+detail = folium.FeatureGroup(name=f"Busiest area, resolution 9 ({len(near):,} cells)", show=False)
+norm = mcolors.Normalize(vmin=near.risk_score.min(), vmax=near.risk_score.max())
+for row in near.itertuples():
+    color = mcolors.to_hex(shade(norm(row.risk_score)))
+    folium.Polygon(
+        locations=h3.cell_to_boundary(row.h3_r9),
+        color=color, fill=True, fill_color=color, fill_opacity=0.6, weight=0.5,
+        tooltip=(f"{row.h3_r9}<br>score {row.risk_score:.2f}<br>"
+                 f"{row.vehicle_km_per_day:,.0f} vehicle-km/day<br>"
+                 f"{row.mean_speed_kph:.0f} km/h, speeding {row.speeding_pct:.0f}%, "
+                 f"congested {row.congestion_pct:.0f}%"),
+    ).add_to(detail)
+detail.add_to(chart)
+
+folium.LayerControl(collapsed=False).add_to(chart)
 display(chart)
 
 # COMMAND ----------
@@ -348,9 +437,7 @@ display(chart)
 # MAGIC ```
 # MAGIC
 # MAGIC The example uses two ways from the M20 motorway in Kent. In production, the matcher
-# MAGIC provides one list per trip. The table summarises the route for the day; the chart is the
-# MAGIC route's speed profile by local hour, with the p85 line showing how far above the limit the
-# MAGIC faster traffic runs.
+# MAGIC provides one list per trip.
 
 # COMMAND ----------
 
@@ -358,13 +445,16 @@ MATCHED_OSM_WAYS = [4394118, 4394117]
 
 spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW route_hours AS
-    SELECT s.dseg_id, s.length_m, s.speed_limit_kph, h.harmonic_speed_kph, h.speed_percentiles_kph,
+    SELECT s.dseg_id, s.length_m, s.speed_limit_kph, s.street_name, s.geometry_wkt,
+           h.harmonic_speed_kph, h.speed_percentiles_kph,
            hour(from_utc_timestamp(make_timestamp(year(h.observation_date), month(h.observation_date),
-                                                  day(h.observation_date), h.hour_utc, 0, 0), s.time_zone)) AS hour_local,
+                                                  day(h.observation_date), h.hour_utc, 0, 0),
+                                   s.time_zone))                                          AS hour_local,
            CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
-                WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph THEN 1.0 ELSE 0.0 END AS speeding,
-           CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph THEN 1.0 ELSE 0.0 END               AS congested,
-           CASE WHEN h.speed_percentiles_kph IS NULL THEN 1.0 ELSE 0.0 END                             AS single_observation
+                WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
+                THEN 1.0 ELSE 0.0 END                                                     AS speeding,
+           CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph THEN 1.0 ELSE 0.0 END AS congested,
+           CASE WHEN h.speed_percentiles_kph IS NULL THEN 1.0 ELSE 0.0 END                AS single_observation
     FROM {stats}.segments s
     JOIN {stats}.hourly_stats h USING (dseg_id)
     WHERE arrays_overlap(s.osm_way_ids, array({", ".join(f"{w}L" for w in MATCHED_OSM_WAYS)}))
@@ -374,13 +464,16 @@ spark.sql(f"""
       AND h.harmonic_speed_kph > 0
     """)
 
+spark.sql("""
+    CREATE OR REPLACE TEMPORARY VIEW route_segments AS
+    SELECT dseg_id, any_value(street_name) AS street_name, any_value(geometry_wkt) AS geometry_wkt,
+           any_value(length_m) AS length_m, any_value(speed_limit_kph) AS speed_limit_kph,
+           avg(harmonic_speed_kph) AS mean_speed_kph, avg(speeding) AS speeding_rate,
+           avg(congested) AS congestion_rate, avg(single_observation) AS single_observation_rate
+    FROM route_hours GROUP BY dseg_id HAVING count(speed_percentiles_kph) > 0
+    """)
+
 display(spark.sql("""
-        WITH per_segment AS (
-            SELECT dseg_id, any_value(length_m) AS length_m, avg(harmonic_speed_kph) AS mean_speed_kph,
-                   avg(speeding) AS speeding_rate, avg(congested) AS congestion_rate,
-                   avg(single_observation) AS single_observation_rate
-            FROM route_hours GROUP BY dseg_id HAVING count(speed_percentiles_kph) > 0
-        )
         SELECT count(*)                                     AS segments_on_route,
                round(sum(length_m) / 1000, 1)               AS route_km,
                round(avg(mean_speed_kph), 1)                AS mean_speed_kph,
@@ -388,21 +481,69 @@ display(spark.sql("""
                round(100 * avg(congestion_rate), 1)         AS pct_hours_congested,
                round(100 * avg(single_observation_rate), 1) AS pct_hours_single_observation,
                round(100 * sum(length_m * speeding_rate) / sum(length_m), 1) AS pct_speeding_by_length
-        FROM per_segment
+        FROM route_segments
         """))
 
-route_day = spark.sql("""
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC The route in two views. The profile is the whole route through the day, with the p85 line
+# MAGIC against the posted limit: where p85 sits above the dashed line, the faster sixth of the
+# MAGIC traffic is over the limit. The map is the same route segment by segment, shaded by how
+# MAGIC much of its day was spent that way, which is where a uniform-looking route turns out to
+# MAGIC have uneven stretches.
+
+# COMMAND ----------
+
+route = spark.sql("SELECT * FROM route_segments").toPandas()
+
+if route.empty:
+    raise ValueError(
+        f"None of the OSM ways {MATCHED_OSM_WAYS} lie in region '{region}'. They are on the M20 "
+        f"in Kent, which is in the london extract. Set the region widget back to london, or put "
+        f"way IDs from your own matched trace in MATCHED_OSM_WAYS."
+    )
+
+profile = spark.sql("""
         SELECT hour_local,
-               round(avg(harmonic_speed_kph), 1)                      AS `harmonic mean`,
-               round(avg(element_at(speed_percentiles_kph, 17)), 1)   AS `p85`,
-               round(avg(speed_limit_kph), 1)                         AS `speed limit`
+               round(avg(harmonic_speed_kph), 1)                    AS harmonic_mean,
+               round(avg(element_at(speed_percentiles_kph, 17)), 1) AS p85,
+               round(avg(element_at(speed_percentiles_kph, 3)), 1)  AS p15,
+               round(avg(speed_limit_kph), 1)                       AS speed_limit
         FROM route_hours GROUP BY hour_local ORDER BY hour_local
         """).toPandas()
 
-px.line(route_day.melt("hour_local", var_name="line", value_name="kph"), x="hour_local", y="kph", color="line",
-        markers=True, line_dash="line", line_dash_map={"speed limit": "dash"},
-        labels=dict(hour_local="local hour", kph="km/h", line=""),
-        title=f"The route through the day, {observation_date}").show()
+fig, ax = plt.subplots(figsize=(11, 5))
+ax.fill_between(profile.hour_local, profile.p15, profile.p85, alpha=0.2, color="steelblue",
+                label="p15 to p85")
+ax.plot(profile.hour_local, profile.harmonic_mean, marker="o", color="steelblue",
+        label="Harmonic mean")
+ax.plot(profile.hour_local, profile.speed_limit, linestyle="--", color="black",
+        label="Speed limit")
+ax.set_xlabel("Local hour")
+ax.set_ylabel("km/h")
+ax.set_title(f"The route through {observation_date}", fontsize=13, fontweight="bold")
+ax.set_xticks(range(0, 24, 2))
+ax.legend()
+plt.tight_layout()
+plt.show()
+
+centre_point = wkt.loads(route.geometry_wkt.iloc[len(route) // 2]).coords[0]
+
+chart = basemap(centre_point[1], centre_point[0], 11)
+norm = mcolors.Normalize(vmin=0, vmax=1)
+
+for row in route.itertuples():
+    folium.PolyLine(
+        [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
+        color=mcolors.to_hex(cm.YlOrRd(norm(row.speeding_rate))), weight=4, opacity=0.9,
+        tooltip=(f"{row.street_name or 'unnamed'} | "
+                 f"speeding in {100 * row.speeding_rate:.0f}% of hours | "
+                 f"{row.mean_speed_kph:.0f} km/h against a {row.speed_limit_kph:.0f} limit | "
+                 f"congested {100 * row.congestion_rate:.0f}%"),
+    ).add_to(chart)
+
+display(chart)
 
 # COMMAND ----------
 
@@ -422,6 +563,8 @@ px.line(route_day.melt("hour_local", var_name="line", value_name="kph"), x="hour
 # MAGIC
 # MAGIC - **Score frequency and severity separately.** Section 4 shows why one number hides two
 # MAGIC   kinds of risk; the factor columns are already there.
+# MAGIC - **Rank or log-scale the exposure term.** Section 3 shows how skewed it is. Min-max
+# MAGIC   scaling on a long tail gives ordinary cells almost no exposure signal.
 # MAGIC - **Weight the route by time, not distance.** A congested kilometre has more exposure than
 # MAGIC   a clear one. Use `aadt_by_day_hour` to apply hourly weights.
 # MAGIC - **Join the two datasets on OpenStreetMap as well as H3.** `segments.osm_way_ids` is an
