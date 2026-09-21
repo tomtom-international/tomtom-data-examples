@@ -70,6 +70,21 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2
+
+# COMMAND ----------
+
+import folium
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import numpy as np
+import plotly.express as px
+from shapely import wkt
+
+px.defaults.template = "plotly_white"
+
+# COMMAND ----------
+
 # The default is what Marketplace suggests when you install this listing.
 dbutils.widgets.text(
     "catalog", "TomTom_Traffic_Volumes", "Catalog you attached the share as"
@@ -121,10 +136,6 @@ display(spark.sql(f"""
 # MAGIC Group or sum by `frc`; use `frc_key` to reconcile with published figures.
 
 # COMMAND ----------
-
-import plotly.express as px
-
-px.defaults.template = "plotly_white"
 
 cov = spark.sql(f"""
         SELECT region, vintage_year, frc_key, frc, frc_label,
@@ -288,16 +299,6 @@ display(spark.sql(f"""
 # MAGIC your extract covers.
 
 # COMMAND ----------
-
-# MAGIC %pip install folium==0.20.0 shapely==2.1.2
-
-# COMMAND ----------
-
-import folium
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-import numpy as np
-from shapely import wkt
 
 REGION = "melbourne"
 AREA = (144.94, -37.83, 144.99, -37.80)  # west, south, east, north

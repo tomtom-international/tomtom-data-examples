@@ -75,6 +75,20 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2
+
+# COMMAND ----------
+
+import folium
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import plotly.express as px
+from shapely import wkt
+
+px.defaults.template = "plotly_white"
+
+# COMMAND ----------
+
 # The default is what Marketplace suggests when you install this listing, so accepting the
 # suggested name means this notebook runs unedited.
 dbutils.widgets.text(
@@ -228,10 +242,6 @@ spark.sql(f"""
     JOIN {segments} s USING (dseg_id)
     WHERE s.frc <= 4 AND s.speed_limit_kph > 0
     """)
-
-import plotly.express as px
-
-px.defaults.template = "plotly_white"
 
 by_hour = spark.sql("""
         SELECT hour_local, cast(frc AS STRING) AS frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
@@ -426,15 +436,6 @@ display(spark.sql(f"""
 # MAGIC Geometry is a WKT LineString in EPSG:4326. Set `AREA` to a region in your extract.
 
 # COMMAND ----------
-
-# MAGIC %pip install folium==0.20.0 shapely==2.1.2
-
-# COMMAND ----------
-
-import folium
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from shapely import wkt
 
 # Centred on where the region's segments are
 centre = spark.sql(

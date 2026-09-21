@@ -27,6 +27,20 @@
 
 # COMMAND ----------
 
+# MAGIC %pip install folium==0.20.0 h3==4.5.0
+
+# COMMAND ----------
+
+import folium
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import plotly.express as px
+from h3 import cell_to_boundary, cell_to_latlng
+
+px.defaults.template = "plotly_white"
+
+# COMMAND ----------
+
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
 dbutils.widgets.text(
     "volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog"
@@ -188,15 +202,13 @@ display(spark.sql("""
         ORDER BY mean_speed_kph DESC
         """))
 
-import plotly.express as px
-
 sample = spark.sql("""
         SELECT vehicle_km_per_day, mean_speed_kph, speeding_pct, congestion_pct, risk_score
         FROM territory_risk WHERE vehicle_km_per_day > 0 ORDER BY rand() LIMIT 5000
         """).toPandas()
 
 px.scatter(sample, x="mean_speed_kph", y="vehicle_km_per_day", color="risk_score", log_y=True, opacity=0.6,
-           color_continuous_scale="YlOrRd", hover_data=["speeding_pct", "congestion_pct"], template="plotly_white",
+           color_continuous_scale="YlOrRd", hover_data=["speeding_pct", "congestion_pct"],
            labels=dict(mean_speed_kph="mean speed, km/h", vehicle_km_per_day="vehicle-km per day", risk_score="score"),
            title=f"5,000 sampled cells, {region}").show()
 
@@ -214,15 +226,6 @@ px.scatter(sample, x="mean_speed_kph", y="vehicle_km_per_day", color="risk_score
 # MAGIC instead of treating an empty lane like a motorway.
 
 # COMMAND ----------
-
-# MAGIC %pip install folium==0.20.0 h3==4.5.0
-
-# COMMAND ----------
-
-import folium
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from h3 import cell_to_boundary, cell_to_latlng
 
 MAP_RESOLUTION = 6
 
