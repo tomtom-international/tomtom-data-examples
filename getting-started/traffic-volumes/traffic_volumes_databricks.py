@@ -78,11 +78,8 @@ import folium
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import numpy as np
-import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import shapely
-from pyspark.sql import functions as F
 from shapely import wkt
 
 px.defaults.template = "plotly_white"
@@ -107,30 +104,6 @@ except Exception as error:
 
 aadt = f"{catalog}.traffic_volumes.aadt_segments"
 coverage = f"{catalog}.traffic_volumes.coverage"
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC `length_m` joined the table in September 2026. A share published before that lacks it, so
-# MAGIC the cell below derives it from the geometry when it is missing and reads the table through
-# MAGIC a view of the same name.
-
-# COMMAND ----------
-
-if "length_m" not in spark.table(aadt).columns:
-
-    @F.pandas_udf("double")
-    def length_m(geometry_wkt: pd.Series) -> pd.Series:
-        geoms = shapely.from_wkt(geometry_wkt.to_numpy())
-        xy, i = shapely.get_coordinates(geoms, return_index=True)
-        lon, lat = np.radians(xy[:, 0]), np.radians(xy[:, 1])
-        a = (np.sin((lat[1:] - lat[:-1]) / 2) ** 2
-             + np.cos(lat[:-1]) * np.cos(lat[1:]) * np.sin((lon[1:] - lon[:-1]) / 2) ** 2)
-        step = 2 * 6_371_008.8 * np.arcsin(np.sqrt(a)) * (i[1:] == i[:-1])
-        return pd.Series(np.bincount(i[1:], weights=step, minlength=len(geoms)))
-
-    spark.table(aadt).withColumn("length_m", length_m("geometry_wkt")).createOrReplaceTempView("aadt_segments")
-    aadt = "aadt_segments"
 
 # COMMAND ----------
 

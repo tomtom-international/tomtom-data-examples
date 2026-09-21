@@ -30,19 +30,15 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install folium==0.20.0 h3==4.5.0 shapely==2.1.2
+# MAGIC %pip install folium==0.20.0 h3==4.5.0
 
 # COMMAND ----------
 
 import folium
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
-import numpy as np
-import pandas as pd
 import plotly.express as px
-import shapely
 from h3 import cell_to_boundary, cell_to_latlng
-from pyspark.sql import functions as F
 
 px.defaults.template = "plotly_white"
 
@@ -74,23 +70,6 @@ for schema in (stats, volumes):
             f"listings. Run SHOW CATALOGS if you are not sure what they were called."
         ) from None
 
-aadt = f"{volumes}.aadt_segments"
-
-if "length_m" not in spark.table(aadt).columns:
-
-    @F.pandas_udf("double")
-    def length_m(geometry_wkt: pd.Series) -> pd.Series:
-        geoms = shapely.from_wkt(geometry_wkt.to_numpy())
-        xy, i = shapely.get_coordinates(geoms, return_index=True)
-        lon, lat = np.radians(xy[:, 0]), np.radians(xy[:, 1])
-        a = (np.sin((lat[1:] - lat[:-1]) / 2) ** 2
-             + np.cos(lat[:-1]) * np.cos(lat[1:]) * np.sin((lon[1:] - lon[:-1]) / 2) ** 2)
-        step = 2 * 6_371_008.8 * np.arcsin(np.sqrt(a)) * (i[1:] == i[:-1])
-        return pd.Series(np.bincount(i[1:], weights=step, minlength=len(geoms)))
-
-    spark.table(aadt).withColumn("length_m", length_m("geometry_wkt")).createOrReplaceTempView("aadt_segments")
-    aadt = "aadt_segments"
-
 # COMMAND ----------
 
 # MAGIC %md
@@ -111,7 +90,7 @@ spark.sql(f"""
     SELECT h3_r9, count(*) AS segments, min(frc) AS most_major_road_class,
            round(sum(length_m) / 1000, 2) AS network_km,
            round(sum(aadt * length_m) / 1000) AS vehicle_km_per_day
-    FROM {aadt}
+    FROM {volumes}.aadt_segments
     WHERE region = '{region}' AND vintage_year = {vintage_year}
     GROUP BY h3_r9
     """)
