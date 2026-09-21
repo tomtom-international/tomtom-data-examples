@@ -208,9 +208,9 @@ display(spark.sql(f"""
 # MAGIC
 # MAGIC Speed by hour is read **within each road class**. The set of segments that report changes
 # MAGIC through the day: at night the mix tilts towards motorways and major roads, by day towards
-# MAGIC local streets. The first table has one column per class; the second reads speed as a share
-# MAGIC of the posted limit, which compares across classes, next to the share of rows on classes 0
-# MAGIC to 2 in that hour.
+# MAGIC local streets. The chart has one line per class; the table reads speed as a share of the
+# MAGIC posted limit, which compares across classes, next to the share of rows on classes 0 to 2
+# MAGIC in that hour.
 
 # COMMAND ----------
 
@@ -229,13 +229,18 @@ spark.sql(f"""
     WHERE s.frc <= 4 AND s.speed_limit_kph > 0
     """)
 
-display(spark.sql("""
-        SELECT * FROM (
-            SELECT hour_local, frc, harmonic_speed_kph FROM local_hours
-        )
-        PIVOT (round(avg(harmonic_speed_kph), 1) FOR frc IN (0 AS frc_0, 1 AS frc_1, 2 AS frc_2, 3 AS frc_3, 4 AS frc_4))
-        ORDER BY hour_local
-        """))
+import plotly.express as px
+
+px.defaults.template = "plotly_white"
+
+by_hour = spark.sql("""
+        SELECT hour_local, cast(frc AS STRING) AS frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
+        FROM local_hours GROUP BY 1, 2 ORDER BY 1, 2
+        """).toPandas()
+
+px.line(by_hour, x="hour_local", y="speed_kph", color="frc", markers=True,
+        labels=dict(hour_local="local hour", speed_kph="harmonic speed, km/h", frc="class"),
+        title=f"Speed by local hour and road class, {region}").show()
 
 display(spark.sql("""
         SELECT hour_local,
@@ -341,6 +346,9 @@ display(spark.sql("""
 # MAGIC `speeding_pct` are based on measured hours, so adding Saturday and Sunday dilutes them
 # MAGIC on commuter roads. Roads that are busy on weekends may then look worse. Score weekdays
 # MAGIC and weekends separately if needed.
+# MAGIC
+# MAGIC The chart shows how the score spreads within each road class. Section 7 draws the
+# MAGIC segments above its 80th percentile.
 
 # COMMAND ----------
 
@@ -371,6 +379,15 @@ display(spark.sql("""
                single_observation_pct, risk_score
         FROM segment_risk ORDER BY risk_score DESC LIMIT 20
         """))
+
+scores = spark.sql("""
+        SELECT cast(frc AS STRING) AS frc, round(risk_score, 2) AS risk_score, count(*) AS segments
+        FROM segment_risk GROUP BY 1, 2 ORDER BY 1, 2
+        """).toPandas()
+
+px.line(scores, x="risk_score", y="segments", color="frc", log_y=True,
+        labels=dict(risk_score="risk score", frc="class"),
+        title="Segments per risk score, by road class").show()
 
 # COMMAND ----------
 

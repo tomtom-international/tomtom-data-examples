@@ -61,8 +61,7 @@
 # MAGIC    estimate.
 # MAGIC 2. **AADT comes in two arrays.** `aadt_by_day` has 7 values, starting with Monday.
 # MAGIC    `aadt_by_day_hour` has 168 values, ordered by day and then hour. Position `(day * 24) +
-# MAGIC    hour` uses Monday as day 0. This notebook uses `element_at` and `posexplode`, which
-# MAGIC    count from 1 and 0, respectively.
+# MAGIC    hour` uses Monday as day 0. This notebook uses `posexplode`, which counts from 0.
 # MAGIC 3. **Regions are metropolitan extracts far wider than the city.** `london` runs from the
 # MAGIC    Dorset coast to the Peak District and includes Birmingham, Bristol and Southampton;
 # MAGIC    `melbourne` covers most of Victoria. Section 1 prints each extent.
@@ -123,14 +122,23 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-display(spark.sql(f"""
+import plotly.express as px
+
+px.defaults.template = "plotly_white"
+
+cov = spark.sql(f"""
         SELECT region, vintage_year, frc_key, frc, frc_label,
                round(total_length_m / 1000, 1)   AS total_km,
                round(covered_length_m / 1000, 1) AS covered_km,
                coverage_pct
         FROM {coverage}
         ORDER BY region, vintage_year, frc_key
-        """))
+        """).toPandas()
+
+display(cov)
+px.bar(cov, x="frc_label", y="coverage_pct", color="region", barmode="group", facet_col="vintage_year",
+       labels=dict(frc_label="", coverage_pct="% of network with an estimate"),
+       title="Coverage by road class").show()
 
 # COMMAND ----------
 
@@ -158,27 +166,23 @@ display(spark.sql(f"""
 # MAGIC %md
 # MAGIC ## 4. The weekly shape
 # MAGIC
-# MAGIC `posexplode` turns the array into rows and keeps each slot's position. This links each
-# MAGIC slot to a weekday.
+# MAGIC `posexplode` turns the 168-slot array into rows and keeps each slot's position, which
+# MAGIC gives the day and the hour. Each cell below is the mean share of a segment's AADT that
+# MAGIC falls in that hour, over classes 0 to 4.
 
 # COMMAND ----------
 
-display(spark.sql(f"""
-        SELECT
-            element_at(
-                array('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday',
-                      'Saturday', 'Sunday'),
-                day_index + 1
-            )                                           AS day_of_week,
-            round(avg(day_aadt))                        AS mean_aadt,
-            round(100.0 * avg(day_aadt) / avg(aadt), 1) AS pct_of_annual_average
-        FROM (
-            SELECT aadt, posexplode(aadt_by_day) AS (day_index, day_aadt)
-            FROM {aadt} WHERE frc <= 4
-        )
-        GROUP BY day_index
-        ORDER BY day_index
-        """))
+profile = spark.sql(f"""
+        SELECT floor(pos / 24) AS day_index, pos % 24 AS hour_of_day,
+               round(100.0 * avg(hour_aadt / aadt), 2) AS pct_of_aadt
+        FROM {aadt} LATERAL VIEW posexplode(aadt_by_day_hour) t AS pos, hour_aadt
+        WHERE frc <= 4 AND aadt > 0
+        GROUP BY 1, 2
+        """).toPandas().pivot(index="day_index", columns="hour_of_day", values="pct_of_aadt")
+
+px.imshow(profile, x=[f"{h:02d}" for h in range(24)], y=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+          color_continuous_scale="YlOrRd", labels=dict(x="hour", y="", color="% of AADT"),
+          title="Hourly share of AADT, classes 0 to 4").show()
 
 # COMMAND ----------
 

@@ -165,7 +165,9 @@ display(spark.sql("SELECT * FROM territory_risk ORDER BY risk_score DESC LIMIT 1
 # MAGIC instead of combining them into one number. Keeping the component columns makes this possible.
 # MAGIC
 # MAGIC The breakdown below uses the full extract, not just the top rows. The pattern is the same:
-# MAGIC motorway cells speed twice as often as urban cells and congest twenty times less.
+# MAGIC motorway cells speed twice as often as urban cells and congest twenty times less. The
+# MAGIC scatter draws a random sample of cells; the two types sit at opposite ends of the speed
+# MAGIC axis.
 
 # COMMAND ----------
 
@@ -185,6 +187,18 @@ display(spark.sql("""
         GROUP BY cell_type
         ORDER BY mean_speed_kph DESC
         """))
+
+import plotly.express as px
+
+sample = spark.sql("""
+        SELECT vehicle_km_per_day, mean_speed_kph, speeding_pct, congestion_pct, risk_score
+        FROM territory_risk WHERE vehicle_km_per_day > 0 ORDER BY rand() LIMIT 5000
+        """).toPandas()
+
+px.scatter(sample, x="mean_speed_kph", y="vehicle_km_per_day", color="risk_score", log_y=True, opacity=0.6,
+           color_continuous_scale="YlOrRd", hover_data=["speeding_pct", "congestion_pct"], template="plotly_white",
+           labels=dict(mean_speed_kph="mean speed, km/h", vehicle_km_per_day="vehicle-km per day", risk_score="score"),
+           title=f"5,000 sampled cells, {region}").show()
 
 # COMMAND ----------
 
