@@ -74,39 +74,21 @@
 
 # COMMAND ----------
 
-from decimal import Decimal
-
 import folium
 import h3
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from branca.colormap import LinearColormap
 from matplotlib.collections import LineCollection
+from pyspark.sql.types import DecimalType
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
 
-
-def collect(query):
-    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
-    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
-    frame = spark.sql(query).toPandas()
-    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
-    return frame.astype({c: float for c in decimals})
-
-
-def basemap(lat, lon, zoom):
-    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
-    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
-    chart.get_root().header.add_child(folium.Element(
-        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
-    ))
-    return chart
-
-
+DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+HEAT = ["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"]
 FRC_LABELS = {
     0: "Motorway", 1: "Major road", 2: "Other major road", 3: "Secondary road",
     4: "Local connecting", 5: "Local high importance", 6: "Local road",
@@ -117,20 +99,41 @@ FRC_COLORS = {
     5: "#feb24c", 6: "#fed976", 7: "#ffeda0", 8: "#ffffcc",
 }
 
+
+def collect(query):
+    """Run a query into pandas. Spark types expressions built from literals such as `1.0` as
+    DECIMAL, which pandas receives as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query)
+    decimals = {f.name: float for f in frame.schema if isinstance(f.dataType, DecimalType)}
+    return frame.toPandas().astype(decimals)
+
+
+def overlaps(area):
+    """SQL predicate for segments whose bounding box touches `area` = (west, south, east, north)."""
+    west, south, east, north = area
+    return f"max_lon >= {west} AND min_lon <= {east} AND max_lat >= {south} AND min_lat <= {north}"
+
+
+def basemap(lat, lon, zoom):
+    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
+    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
+    ))
+    return chart
+
 # COMMAND ----------
 
 # The defaults are what Marketplace suggests when you install this listing.
-dbutils.widgets.text(
-    "catalog", "TomTom_Traffic_Volumes", "Catalog you attached the share as"
-)
-dbutils.widgets.text(
-    "region", "melbourne", "Region: london, austin, losangeles or melbourne"
-)
+dbutils.widgets.text("catalog", "TomTom_Traffic_Volumes", "Catalog you attached the share as")
+dbutils.widgets.text("region", "melbourne", "Region: london, austin, losangeles or melbourne")
 dbutils.widgets.text("vintage_year", "2025", "Vintage year")
 
 catalog = dbutils.widgets.get("catalog")
 region = dbutils.widgets.get("region")
 vintage_year = int(dbutils.widgets.get("vintage_year"))
+aadt = f"{catalog}.traffic_volumes.aadt_segments"
+coverage = f"{catalog}.traffic_volumes.coverage"
 
 try:
     spark.sql(f"DESCRIBE SCHEMA {catalog}.traffic_volumes")
@@ -141,9 +144,6 @@ except Exception as error:
         f"widget at the top of this notebook to the catalog you accepted when you installed "
         f"the listing. Run SHOW CATALOGS if you are not sure what it was called."
     ) from None
-
-aadt = f"{catalog}.traffic_volumes.aadt_segments"
-coverage = f"{catalog}.traffic_volumes.coverage"
 
 # Everything after section 1 reads one region and one vintage through this view.
 spark.sql(f"""
@@ -210,26 +210,21 @@ cov = collect(f"""
 
 display(cov)
 
+labels = [f"FRC {f}" for f in cov.frc]
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
-x = range(len(cov))
 
-ax1.bar(x, cov.covered_km, color="#2ca02c", label="Covered")
-ax1.bar(x, cov.total_km - cov.covered_km, bottom=cov.covered_km, color="#d3d3d3", label="Not covered")
-ax1.set_xticks(list(x))
-ax1.set_xticklabels([f"FRC {f}" for f in cov.frc], rotation=45, ha="right")
-ax1.set_ylabel("Road network length (km)")
-ax1.set_title(f"Network length by road class, {region} {vintage_year}")
+ax1.bar(labels, cov.covered_km, color="#2ca02c", label="Covered")
+ax1.bar(labels, cov.total_km - cov.covered_km, bottom=cov.covered_km, color="#d3d3d3",
+        label="Not covered")
+ax1.set(ylabel="Road network length (km)",
+        title=f"Network length by road class, {region} {vintage_year}")
 ax1.legend()
 
-colors = ["#2ca02c" if c > 70 else "#ff7f0e" if c > 30 else "#d62728" for c in cov.coverage_pct]
-ax2.barh(x, cov.coverage_pct, color=colors)
-ax2.set_yticks(list(x))
-ax2.set_yticklabels([f"FRC {f}: {label}" for f, label in zip(cov.frc, cov.frc_label)])
-ax2.set_xlabel("Coverage (%)")
-ax2.set_xlim(0, 105)
-ax2.set_title("Share of each class carrying an AADT estimate")
-for i, v in enumerate(cov.coverage_pct):
-    ax2.text(v + 1, i, f"{v:.0f}%", va="center", fontsize=9)
+bars = ax2.barh([f"{label}: {name}" for label, name in zip(labels, cov.frc_label)], cov.coverage_pct,
+                color=["#2ca02c" if c > 70 else "#ff7f0e" if c > 30 else "#d62728"
+                       for c in cov.coverage_pct])
+ax2.bar_label(bars, fmt="%.0f%%", padding=3, fontsize=9)
+ax2.set(xlabel="Coverage (%)", xlim=(0, 105), title="Share of each class carrying an AADT estimate")
 
 plt.tight_layout()
 plt.show()
@@ -254,31 +249,24 @@ by_class = collect("""
         FROM segments GROUP BY frc ORDER BY frc
         """)
 
+colors = [FRC_COLORS.get(f, "#999") for f in by_class.frc]
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
-ax1.bar(range(len(by_class)), by_class.segments,
-        color=[FRC_COLORS.get(f, "#999") for f in by_class.frc])
-ax1.set_xticks(range(len(by_class)))
-ax1.set_xticklabels([f"FRC {f}\n{FRC_LABELS.get(f, '')}" for f in by_class.frc],
-                    rotation=45, ha="right", fontsize=8)
-ax1.set_ylabel("Number of segments")
-ax1.set_title("Road segments by class")
-for i, (n, pct) in enumerate(zip(by_class.segments, by_class.pct_of_vehicle_km)):
-    ax1.text(i, n, f"{n:,}\n{pct:.0f}% of veh-km", ha="center", va="bottom", fontsize=8)
+bars = ax1.bar([f"FRC {f}\n{FRC_LABELS.get(f, '')}" for f in by_class.frc], by_class.segments,
+               color=colors)
+ax1.bar_label(bars, [f"{n:,}\n{pct:.0f}% of veh-km"
+                     for n, pct in zip(by_class.segments, by_class.pct_of_vehicle_km)], fontsize=8)
+ax1.tick_params(axis="x", labelsize=8)
+ax1.set(ylabel="Number of segments", title="Road segments by class")
 
 # The quantiles come back from Spark, so no per-segment row reaches the driver
-box = ax2.bxp(
-    [dict(label=f"FRC {row.frc}", whislo=row.quantiles[0], q1=row.quantiles[1],
-          med=row.quantiles[2], q3=row.quantiles[3], whishi=row.quantiles[4], fliers=[])
-     for row in by_class.itertuples()],
-    patch_artist=True, showfliers=False,
-)
-for patch, f in zip(box["boxes"], by_class.frc):
-    patch.set_facecolor(FRC_COLORS.get(f, "#999"))
-ax2.set_yscale("log")
-ax2.set_ylabel("AADT (log scale), 5th to 95th percentile")
-ax2.set_title("Traffic volume distribution by road class")
-ax2.tick_params(axis="x", rotation=45)
+box = ax2.bxp([dict(zip(["whislo", "q1", "med", "q3", "whishi"], row.quantiles),
+                    label=f"FRC {row.frc}", fliers=[]) for row in by_class.itertuples()],
+              patch_artist=True, showfliers=False)
+for patch, color in zip(box["boxes"], colors):
+    patch.set_facecolor(color)
+ax2.set(yscale="log", ylabel="AADT (log scale), 5th to 95th percentile",
+        title="Traffic volume distribution by road class")
 
 plt.tight_layout()
 plt.show()
@@ -305,11 +293,9 @@ profile = collect(f"""
         SELECT frc, floor(pos / 24) AS day_index, pos % 24 AS hour_of_day,
                avg(hour_aadt) AS mean_hour_aadt
         FROM segments LATERAL VIEW posexplode(aadt_by_day_hour) t AS pos, hour_aadt
-        WHERE frc IN ({", ".join(str(f) for f in PROFILE_CLASSES)})
+        WHERE frc IN ({", ".join(map(str, PROFILE_CLASSES))})
         GROUP BY 1, 2, 3
         """)
-
-DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 fig, axes = plt.subplots(2, 2, figsize=(16, 10))
 for ax, frc in zip(axes.flat, PROFILE_CLASSES):
@@ -319,34 +305,26 @@ for ax, frc in zip(axes.flat, PROFILE_CLASSES):
         ax.set_axis_off()
         continue
     grid = subset.pivot(index="day_index", columns="hour_of_day", values="mean_hour_aadt")
-    sns.heatmap(grid, ax=ax, cmap="YlOrRd",
-                xticklabels=[f"{h:02d}" for h in range(24)], yticklabels=DAYS,
-                cbar_kws={"label": "Mean vehicles/hour"})
-    ax.set_title(f"FRC {frc}: {FRC_LABELS.get(frc, '')}", fontsize=11, fontweight="bold")
-    ax.set_xlabel("Hour of day")
-    ax.set_ylabel("")
+    sns.heatmap(grid, ax=ax, cmap="YlOrRd", yticklabels=DAYS,
+                xticklabels=[f"{h:02d}" for h in range(24)], cbar_kws={"label": "Mean vehicles/hour"})
+    ax.set_title(f"FRC {frc}: {FRC_LABELS[frc]}", fontsize=11, fontweight="bold")
+    ax.set(xlabel="Hour of day", ylabel="")
 
 plt.suptitle(f"Weekly traffic patterns by road class, {region} {vintage_year}",
              fontsize=14, fontweight="bold", y=1.01)
 plt.tight_layout()
 plt.show()
 
-fig, ax = plt.subplots(figsize=(12, 6))
-for frc in PROFILE_CLASSES:
-    subset = profile[profile.frc == frc]
-    if subset.empty:
-        continue
-    for days, style, width, label in [(range(5), "-", 2, "weekday"), (range(5, 7), "--", 1.5, "weekend")]:
-        curve = (subset[subset.day_index.isin(days)]
-                 .groupby("hour_of_day").mean_hour_aadt.mean())
-        ax.plot(curve.index, 100 * curve / curve.sum(), style, linewidth=width, alpha=0.85,
-                color=FRC_COLORS.get(frc, "#999"), label=f"FRC {frc} {label}")
+shape = (profile.assign(period=np.where(profile.day_index < 5, "weekday", "weekend"))
+         .groupby(["frc", "period", "hour_of_day"]).mean_hour_aadt.mean())
 
-ax.set_xlabel("Hour of day")
-ax.set_ylabel("% of daily traffic")
-ax.set_title("Hourly traffic distribution: weekday (solid) against weekend (dashed)")
-ax.set_xticks(range(0, 24, 2))
-ax.set_xticklabels([f"{h:02d}:00" for h in range(0, 24, 2)])
+fig, ax = plt.subplots(figsize=(12, 6))
+for (frc, period), curve in shape.groupby(level=["frc", "period"]):
+    ax.plot(range(24), 100 * curve.to_numpy() / curve.sum(), "-" if period == "weekday" else "--",
+            color=FRC_COLORS[frc], label=f"FRC {frc} {period}")
+ax.set(xlabel="Hour of day", ylabel="% of daily traffic",
+       title="Hourly traffic distribution: weekday (solid) against weekend (dashed)")
+ax.set_xticks(range(0, 24, 2), [f"{h:02d}:00" for h in range(0, 24, 2)])
 ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=8)
 plt.tight_layout()
 plt.show()
@@ -373,31 +351,24 @@ focus = spark.sql("""
         """).first()
 
 AREA = (focus.lon - 0.12, focus.lat - 0.06, focus.lon + 0.12, focus.lat + 0.06)
-MAX_SEGMENTS_ON_MAP = 4000
 
 box = collect(f"""
-        SELECT geometry_wkt, aadt, frc
-        FROM segments
-        WHERE max_lon >= {AREA[0]} AND min_lon <= {AREA[2]}
-          AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
-        ORDER BY aadt DESC
-        LIMIT {MAX_SEGMENTS_ON_MAP}
+        SELECT geometry_wkt, aadt FROM segments
+        WHERE {overlaps(AREA)}
+        ORDER BY aadt DESC LIMIT 4000
         """)
 
-print(f"{len(box):,} busiest segments in {AREA}")
-
-lines = [list(wkt.loads(g).coords) for g in box.geometry_wkt]
-norm = mcolors.LogNorm(vmin=max(box.aadt.min(), 1), vmax=box.aadt.max())
-
 fig, ax = plt.subplots(figsize=(14, 8))
-collection = LineCollection(lines, array=box.aadt.values, cmap="YlOrRd", norm=norm, linewidths=0.9)
-ax.add_collection(collection)
+roads = LineCollection([list(wkt.loads(g).coords) for g in box.geometry_wkt],
+                       array=box.aadt.to_numpy(), cmap="YlOrRd", linewidths=0.9,
+                       norm=mcolors.LogNorm(vmin=max(box.aadt.min(), 1), vmax=box.aadt.max()))
+ax.add_collection(roads)
 ax.autoscale()
 ax.set_aspect(1 / np.cos(np.radians(focus.lat)))
-ax.set_xlabel("Longitude")
-ax.set_ylabel("Latitude")
-ax.set_title(f"Traffic volume intensity, {region} {vintage_year}", fontsize=14, fontweight="bold")
-fig.colorbar(collection, ax=ax, shrink=0.7, label="AADT (log scale)")
+ax.set(xlabel="Longitude", ylabel="Latitude")
+ax.set_title(f"Traffic volume intensity, {region} {vintage_year} ({len(box):,} busiest segments)",
+             fontsize=14, fontweight="bold")
+fig.colorbar(roads, ax=ax, shrink=0.7, label="AADT (log scale)")
 plt.tight_layout()
 plt.show()
 
@@ -416,32 +387,20 @@ plt.show()
 CBD = (focus.lon - 0.02, focus.lat - 0.012, focus.lon + 0.02, focus.lat + 0.012)
 
 cbd = collect(f"""
-        SELECT segment_id, frc, aadt, osm_id, aadt_by_day, geometry_wkt
-        FROM segments
-        WHERE max_lon >= {CBD[0]} AND min_lon <= {CBD[2]}
-          AND max_lat >= {CBD[1]} AND min_lat <= {CBD[3]}
-        ORDER BY aadt DESC
-        LIMIT 1500
+        SELECT segment_id, frc, aadt, osm_id, aadt_by_day, geometry_wkt FROM segments
+        WHERE {overlaps(CBD)}
+        ORDER BY aadt DESC LIMIT 1500
         """)
 
-print(f"{len(cbd):,} segments in the centre box")
-
 chart = basemap(focus.lat, focus.lon, 15)
-scale = LinearColormap(
-    colors=["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"],
-    vmin=cbd.aadt.quantile(0.05), vmax=cbd.aadt.quantile(0.95),
-    caption="AADT (annual average daily traffic)",
-)
+scale = LinearColormap(HEAT, vmin=cbd.aadt.quantile(0.05), vmax=cbd.aadt.quantile(0.95),
+                       caption="AADT (annual average daily traffic)")
 
 for row in cbd.itertuples():
-    daily = "<br>".join(
-        f"{day}: {value:,.0f}" for day, value in zip(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"], row.aadt_by_day)
-    )
+    daily = "<br>".join(f"{day[:3]}: {value:,.0f}" for day, value in zip(DAYS, row.aadt_by_day))
     folium.PolyLine(
         [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
-        weight=3 + min(row.aadt / 5000, 5),
-        color=scale(row.aadt),
-        opacity=0.8,
+        weight=3 + min(row.aadt / 5000, 5), color=scale(row.aadt), opacity=0.8,
         popup=folium.Popup(
             f"<b>Segment:</b> {row.segment_id}<br>"
             f"<b>FRC:</b> {row.frc} ({FRC_LABELS.get(row.frc, '')})<br>"
@@ -489,16 +448,14 @@ cells = collect(f"""
 display(cells.head(25))
 
 chart = basemap(focus.lat, focus.lon, 12)
-scale = LinearColormap(
-    colors=["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"],
-    vmin=cells.vehicle_km_per_day.quantile(0.1), vmax=cells.vehicle_km_per_day.quantile(0.9),
-    caption="Vehicle-kilometres per day per H3 cell (exposure)",
-)
+scale = LinearColormap(HEAT, vmin=cells.vehicle_km_per_day.quantile(0.1),
+                       vmax=cells.vehicle_km_per_day.quantile(0.9),
+                       caption="Vehicle-kilometres per day per H3 cell (exposure)")
 
 for row in cells.itertuples():
-    color = scale(min(row.vehicle_km_per_day, scale.vmax))
+    color = scale(row.vehicle_km_per_day)
     folium.Polygon(
-        locations=h3.cell_to_boundary(row.h3_r9),
+        h3.cell_to_boundary(row.h3_r9),
         color=color, fill=True, fill_color=color, fill_opacity=0.6, weight=1,
         popup=folium.Popup(
             f"<b>H3 cell:</b> {row.h3_r9}<br>"

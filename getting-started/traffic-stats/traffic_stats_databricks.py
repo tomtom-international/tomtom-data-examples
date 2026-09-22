@@ -79,37 +79,17 @@
 
 # COMMAND ----------
 
-from decimal import Decimal
-
 import folium
 import h3
-import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 from branca.colormap import LinearColormap
 from matplotlib.collections import LineCollection
+from pyspark.sql.types import DecimalType
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
-
-
-def collect(query):
-    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
-    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
-    frame = spark.sql(query).toPandas()
-    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
-    return frame.astype({c: float for c in decimals})
-
-
-def basemap(lat, lon, zoom):
-    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
-    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
-    chart.get_root().header.add_child(folium.Element(
-        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
-    ))
-    return chart
-
 
 FRC_LABELS = {
     0: "Motorway", 1: "Major road", 2: "Other major road", 3: "Secondary road",
@@ -121,25 +101,56 @@ FRC_COLORS = {
 }
 
 
-def histogram(source, expr, lo, hi, bins=50, where="TRUE"):
-    """Bucket counts computed in Spark, so no per-row data reaches the driver."""
-    return collect(f"""
+def collect(query):
+    """Run a query into pandas. Spark types expressions built from literals such as `1.0` as
+    DECIMAL, which pandas receives as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query)
+    decimals = {f.name: float for f in frame.schema if isinstance(f.dataType, DecimalType)}
+    return frame.toPandas().astype(decimals)
+
+
+def histogram(ax, source, expr, lo, hi, bins=50, **style):
+    """Bar chart of `expr` bucketed in Spark, so no per-row data reaches the driver."""
+    counts = collect(f"""
         SELECT {lo} + ({hi} - {lo}) * (bucket + 0.5) / {bins} AS value, count(*) AS rows
-        FROM (
-            SELECT least({bins} - 1, greatest(0, floor(({expr} - {lo}) * {bins} / ({hi} - {lo})))) AS bucket
-            FROM {source} WHERE {where} AND {expr} IS NOT NULL
-        )
+        FROM (SELECT least({bins} - 1, greatest(0, floor(({expr} - {lo}) * {bins} / ({hi} - {lo})))) AS bucket
+              FROM {source} WHERE {expr} IS NOT NULL)
         GROUP BY bucket ORDER BY bucket
         """)
+    ax.bar(counts.value, counts.rows, width=0.9 * (hi - lo) / bins, **style)
+    return counts
+
+
+def overlaps(area):
+    """SQL predicate for segments whose bounding box touches `area` = (west, south, east, north)."""
+    west, south, east, north = area
+    return f"max_lon >= {west} AND min_lon <= {east} AND max_lat >= {south} AND min_lat <= {north}"
+
+
+def basemap(lat, lon, zoom):
+    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
+    chart = folium.Map(location=[lat, lon], zoom_start=zoom, tiles="OpenStreetMap")
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
+    ))
+    return chart
 
 # COMMAND ----------
 
-# The default is what Marketplace suggests when you install this listing, so accepting the
-# suggested name means this notebook runs unedited.
-dbutils.widgets.text(
-    "catalog", "TomTom_Traffic_Stats", "Catalog you attached the dataset as"
-)
+# The catalog default is what Marketplace suggests when you install this listing, so accepting
+# the suggested name means this notebook runs unedited. The dataset covers four metropolitan
+# areas and `hourly_stats` holds 922 million rows for the week, so the notebook reads one
+# region and, by default, one midweek day. Set the dates to 2025-09-01 and 2025-09-07 for the
+# full week; weekday and weekend then separate cleanly in section 6.
+dbutils.widgets.text("catalog", "TomTom_Traffic_Stats", "Catalog you attached the dataset as")
+dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
+dbutils.widgets.text("date_from", "2025-09-03", "First observation date")
+dbutils.widgets.text("date_to", "2025-09-03", "Last observation date")
+
 catalog = dbutils.widgets.get("catalog")
+region = dbutils.widgets.get("region")
+date_from = dbutils.widgets.get("date_from")
+date_to = dbutils.widgets.get("date_to")
 
 try:
     spark.sql(f"DESCRIBE SCHEMA {catalog}.traffic_stats_batch")
@@ -151,21 +162,12 @@ except Exception as error:
         f"the listing. Run SHOW CATALOGS if you are not sure what it was called."
     ) from None
 
-# The dataset covers four metropolitan areas. A whole-dataset query is a fair amount of data for a
-# first look, so the notebook scopes itself to one of them
-dbutils.widgets.text(
-    "region", "london", "Region: london, austin, losangeles or melbourne"
-)
-region = dbutils.widgets.get("region")
-
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW segments AS
     SELECT * FROM {catalog}.traffic_stats_batch.segments WHERE region = '{region}'
     """)
 
-tiles = [
-    row.tile_id for row in spark.sql("SELECT DISTINCT tile_id FROM segments").collect()
-]
+tiles = [row.tile_id for row in spark.sql("SELECT DISTINCT tile_id FROM segments").collect()]
 if not tiles:
     raise ValueError(
         f"No segments in region '{region}'. Run "
@@ -175,37 +177,24 @@ if not tiles:
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW hourly_stats AS
     SELECT * FROM {catalog}.traffic_stats_batch.hourly_stats
-    WHERE tile_id IN ({", ".join(repr(t) for t in tiles)})
+    WHERE tile_id IN ({", ".join(map(repr, tiles))})
     """)
 
-segments = "segments"
-hourly = "hourly_stats"
-
-# `hourly_stats` contains 922 million rows for a full week. To keep reads fast, this
-# notebook processes one day at a time.
-#
-# The default is Wednesday, 2025-09-03, a typical midweek baseline. Set the dates to
-# 2025-09-01 and 2025-09-07 to process the full week; the charts below then show one line
-# per day, and weekday and weekend separate cleanly.
-dbutils.widgets.text("date_from", "2025-09-03", "First observation date")
-dbutils.widgets.text("date_to", "2025-09-03", "Last observation date")
-date_from = dbutils.widgets.get("date_from")
-date_to = dbutils.widgets.get("date_to")
-
-# One row per segment-hour in the window, with the road attributes joined on. Everything
-# after section 2 reads this view.
+# One row per segment-hour in the window, with the road attributes joined on and the hour in
+# local time. `speeding` and `congested` are null where the hour has no distribution or the
+# road has no posted limit, so an average over them is a rate over the hours that can tell.
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW measured AS
-    SELECT h.dseg_id, h.observation_date, h.hour_utc, h.avg_speed_kph, h.harmonic_speed_kph,
-           h.median_speed_kph, h.stddev_speed_kph, h.speed_percentiles_kph,
-           s.frc, s.speed_limit_kph, s.length_m, s.street_name, s.h3_r9,
-           date_format(h.observation_date, 'EEEE') AS day_of_week,
+    SELECT h.dseg_id, h.hour_utc, h.avg_speed_kph, h.harmonic_speed_kph, h.median_speed_kph,
+           h.speed_percentiles_kph, s.frc, s.speed_limit_kph, s.length_m, s.h3_r9,
            dayofweek(h.observation_date) IN (1, 7) AS is_weekend,
-           hour(from_utc_timestamp(
-               make_timestamp(year(h.observation_date), month(h.observation_date),
-                              day(h.observation_date), h.hour_utc, 0, 0), s.time_zone)) AS hour_local
-    FROM {hourly} h
-    JOIN {segments} s USING (dseg_id)
+           hour(from_utc_timestamp(timestampadd(HOUR, h.hour_utc, timestamp(h.observation_date)),
+                                   s.time_zone)) AS hour_local,
+           CASE WHEN s.speed_limit_kph > 0
+                THEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph END AS speeding,
+           CASE WHEN s.speed_limit_kph > 0
+                THEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph END AS congested
+    FROM hourly_stats h JOIN segments s USING (dseg_id)
     WHERE h.observation_date BETWEEN DATE '{date_from}' AND DATE '{date_to}'
       AND h.harmonic_speed_kph > 0
     """)
@@ -227,47 +216,37 @@ spark.sql(f"""
 
 # COMMAND ----------
 
-display(spark.sql(f"""
+display(spark.sql("""
         SELECT count(*) AS segments, round(sum(length_m) / 1000) AS network_km,
                count(DISTINCT country_iso3) AS countries, min(min_lat) AS south,
                max(max_lat) AS north, min(min_lon) AS west, max(max_lon) AS east
-        FROM {segments}
+        FROM segments
         """))
 
-display(spark.sql(f"""
+display(spark.sql("""
         SELECT min(observation_date) AS first_date, max(observation_date) AS last_date,
                count(DISTINCT observation_date) AS days, count(*) AS hourly_rows,
-               round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
-                   AS pct_single_observation
-        FROM {hourly}
+               round(100.0 * avg(int(speed_percentiles_kph IS NULL)), 1) AS pct_single_observation
+        FROM hourly_stats
         """))
 
 # COMMAND ----------
 
-frc_counts = collect(f"SELECT frc, count(*) AS segments FROM {segments} GROUP BY frc ORDER BY frc")
-limits = histogram(segments, "speed_limit_kph", 0, 140, bins=28)
-lengths = histogram(segments, "length_m", 0, 500, bins=50)
-fow = collect(f"""
-        SELECT form_of_way, count(*) AS segments FROM {segments}
-        GROUP BY form_of_way ORDER BY segments DESC LIMIT 8
-        """)
-
 fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
+frc_counts = collect("SELECT frc, count(*) AS segments FROM segments GROUP BY frc ORDER BY frc")
 axes[0, 0].bar(frc_counts.frc, frc_counts.segments,
                color=[FRC_COLORS.get(f, "#999") for f in frc_counts.frc])
-axes[0, 0].set_title("Functional road class")
-axes[0, 0].set_xlabel("FRC (0 = motorway, 7 = local)")
-axes[0, 0].set_ylabel("Segment count")
+axes[0, 0].set(title="Functional road class", xlabel="FRC (0 = motorway, 7 = local)",
+               ylabel="Segment count")
 
-axes[0, 1].bar(limits.value, limits.rows, width=140 / 28 * 0.9, color="coral")
-axes[0, 1].set_title("Posted speed limit")
-axes[0, 1].set_xlabel("km/h")
+histogram(axes[0, 1], "segments", "speed_limit_kph", 0, 140, bins=28, color="coral")
+axes[0, 1].set(title="Posted speed limit", xlabel="km/h")
 
-axes[1, 0].bar(lengths.value, lengths.rows, width=10 * 0.9, color="seagreen")
-axes[1, 0].set_title("Segment length (clipped at 500 m)")
-axes[1, 0].set_xlabel("metres")
+histogram(axes[1, 0], "segments", "length_m", 0, 500, color="seagreen")
+axes[1, 0].set(title="Segment length (clipped at 500 m)", xlabel="metres")
 
+fow = collect("SELECT form_of_way, count(*) AS segments FROM segments GROUP BY 1 ORDER BY 2 DESC LIMIT 8")
 axes[1, 1].barh(fow.form_of_way[::-1], fow.segments[::-1], color="mediumpurple")
 axes[1, 1].set_title("Form of way (top 8)")
 
@@ -287,53 +266,45 @@ plt.show()
 
 # COMMAND ----------
 
-overview = collect(f"""
-        SELECT geometry_wkt, frc FROM {segments} WHERE frc <= 4
+centre = spark.sql("SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM segments").first()
+AREA = (centre.lon - 0.12, centre.lat - 0.06, centre.lon + 0.12, centre.lat + 0.06)
+
+overview = collect("""
+        SELECT geometry_wkt, frc FROM segments WHERE frc <= 4
         ORDER BY frc, length_m DESC LIMIT 25000
         """)
 
-lines = [list(wkt.loads(g).coords) for g in overview.geometry_wkt]
-mid_lat = np.mean([c[0][1] for c in lines])
-
 fig, ax = plt.subplots(figsize=(13, 9))
-collection = LineCollection(lines, array=overview.frc.values, cmap="RdYlGn_r", linewidths=0.4)
-ax.add_collection(collection)
+roads = LineCollection([list(wkt.loads(g).coords) for g in overview.geometry_wkt],
+                       array=overview.frc.to_numpy(), cmap="RdYlGn_r", linewidths=0.4)
+ax.add_collection(roads)
 ax.autoscale()
-ax.set_aspect(1 / np.cos(np.radians(mid_lat)))
-ax.set_xlabel("Longitude")
-ax.set_ylabel("Latitude")
+ax.set_aspect(1 / np.cos(np.radians(centre.lat)))
+ax.set(xlabel="Longitude", ylabel="Latitude")
 ax.set_title(f"Major roads in the {region} extract ({len(overview):,} of the longest drawn)",
              fontsize=13, fontweight="bold")
-fig.colorbar(collection, ax=ax, shrink=0.7, label="FRC (0 = motorway, 4 = local connecting)")
+fig.colorbar(roads, ax=ax, shrink=0.7, label="FRC (0 = motorway, 4 = local connecting)")
 plt.tight_layout()
 plt.show()
 
 # COMMAND ----------
 
-centre = spark.sql(f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}").first()
-AREA = (centre.lon - 0.12, centre.lat - 0.06, centre.lon + 0.12, centre.lat + 0.06)
-
 major = collect(f"""
-        SELECT geometry_wkt, frc, street_name, speed_limit_kph
-        FROM {segments}
-        WHERE frc <= 3
-          AND max_lon >= {AREA[0]} AND min_lon <= {AREA[2]}
-          AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
+        SELECT geometry_wkt, frc, street_name, speed_limit_kph FROM segments
+        WHERE frc <= 3 AND {overlaps(AREA)}
         LIMIT 4000
         """)
 
 chart = basemap(centre.lat, centre.lon, 12)
-
 for frc, color in {0: "red", 1: "darkorange", 2: "blue", 3: "green"}.items():
     subset = major[major.frc == frc]
-    group = folium.FeatureGroup(name=f"FRC {frc} ({len(subset):,} segments)")
+    layer = folium.FeatureGroup(name=f"FRC {frc} ({len(subset):,} segments)").add_to(chart)
     for row in subset.itertuples():
         folium.PolyLine(
             [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
             color=color, weight=2 if frc <= 1 else 1, opacity=0.7,
             tooltip=f"{row.street_name or 'unnamed'} (FRC {frc}, {row.speed_limit_kph} km/h)",
-        ).add_to(group)
-    group.add_to(chart)
+        ).add_to(layer)
 
 folium.LayerControl().add_to(chart)
 display(chart)
@@ -354,44 +325,39 @@ display(chart)
 
 # COMMAND ----------
 
-by_frc = collect(f"""
+by_frc = collect("""
         WITH observed AS (SELECT dseg_id, count(*) AS hours FROM measured GROUP BY dseg_id)
         SELECT s.frc, count(*) AS segments, round(sum(s.length_m) / 1000) AS network_km,
                round(avg(s.speed_limit_kph), 1)              AS avg_speed_limit_kph,
                round(100.0 * count(o.dseg_id) / count(*), 1) AS pct_with_measurements,
                round(avg(o.hours), 1)                        AS avg_hours_measured
-        FROM {segments} s LEFT JOIN observed o USING (dseg_id)
+        FROM segments s LEFT JOIN observed o USING (dseg_id)
         GROUP BY s.frc ORDER BY s.frc
         """)
 
 display(by_frc)
 
-active = spark.sql("SELECT count(DISTINCT dseg_id) AS n FROM measured").first().n
-by_hour = collect(f"""
+by_hour = collect("""
         SELECT hour_utc,
-               round(100.0 * count(DISTINCT dseg_id) / {active}, 1) AS pct_reporting,
-               round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
-                   AS pct_single_observation
+               round(100.0 * count(DISTINCT dseg_id) / (SELECT count(DISTINCT dseg_id) FROM measured), 1)
+                   AS pct_reporting,
+               round(100.0 * avg(int(speed_percentiles_kph IS NULL)), 1) AS pct_single_observation
         FROM measured GROUP BY hour_utc ORDER BY hour_utc
         """)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
-ax1.bar(by_frc.frc, by_frc.pct_with_measurements,
-        color=[FRC_COLORS.get(f, "#999") for f in by_frc.frc])
-ax1.set_title("Segments with any measurement, by road class")
-ax1.set_xlabel("FRC (0 = motorway, 7 = local)")
-ax1.set_ylabel("% of segments")
-for f, v in zip(by_frc.frc, by_frc.pct_with_measurements):
-    ax1.text(f, v, f"{v:.0f}%", ha="center", va="bottom", fontsize=8)
+bars = ax1.bar(by_frc.frc, by_frc.pct_with_measurements,
+               color=[FRC_COLORS.get(f, "#999") for f in by_frc.frc])
+ax1.bar_label(bars, fmt="%.0f%%", fontsize=8)
+ax1.set(title="Segments with any measurement, by road class",
+        xlabel="FRC (0 = motorway, 7 = local)", ylabel="% of segments")
 
 ax2.plot(by_hour.hour_utc, by_hour.pct_reporting, marker="o", color="steelblue", label="Reporting")
 ax2.plot(by_hour.hour_utc, by_hour.pct_single_observation, marker="o", color="coral",
          label="Resting on one vehicle")
-ax2.set_title("Coverage through the day")
-ax2.set_xlabel("Hour (UTC)")
-ax2.set_ylabel("% of active segments / of rows")
-ax2.set_xticks(range(0, 24, 2))
+ax2.set(title="Coverage through the day", xlabel="Hour (UTC)",
+        ylabel="% of active segments / of rows", xticks=range(0, 24, 2))
 ax2.legend()
 
 plt.tight_layout()
@@ -413,7 +379,6 @@ plt.show()
 
 # COMMAND ----------
 
-speeds = histogram("measured", "avg_speed_kph", 0, 150, bins=60)
 sample = collect("""
         SELECT frc, least(avg_speed_kph, 150) AS avg_speed_kph FROM measured
         WHERE frc <= 4 AND rand() < 0.02 LIMIT 150000
@@ -427,24 +392,18 @@ metrics = collect("""
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
-axes[0].bar(speeds.value, speeds.rows, width=2.3, color="steelblue")
-axes[0].set_title(f"Average speed, all {speeds.rows.sum():,} segment-hours")
-axes[0].set_xlabel("km/h")
-axes[0].set_ylabel("Segment-hours")
+speeds = histogram(axes[0], "measured", "avg_speed_kph", 0, 150, bins=60, color="steelblue")
+axes[0].set(title=f"Average speed, all {speeds.rows.sum():,} segment-hours", xlabel="km/h",
+            ylabel="Segment-hours")
 
-for frc in sorted(sample.frc.unique()):
-    sns.kdeplot(sample.avg_speed_kph[sample.frc == frc], ax=axes[1], label=f"FRC {frc}",
-                color=FRC_COLORS.get(frc), alpha=0.8)
-axes[1].set_title("Speed by road class (2% sample)")
-axes[1].set_xlabel("km/h")
-axes[1].set_xlim(0, 150)
+for frc, subset in sample.groupby("frc"):
+    sns.kdeplot(subset.avg_speed_kph, ax=axes[1], label=f"FRC {frc}", color=FRC_COLORS.get(frc), alpha=0.8)
+axes[1].set(title="Speed by road class (2% sample)", xlabel="km/h", xlim=(0, 150))
 axes[1].legend(fontsize=8)
 
-axes[2].bar(metrics.index, metrics.values, color=["steelblue", "coral", "seagreen"])
-axes[2].set_title("The three averages compared")
-axes[2].set_ylabel("km/h")
-for i, v in enumerate(metrics.values):
-    axes[2].text(i, v, f"{v:.1f}", ha="center", va="bottom")
+bars = axes[2].bar(metrics.index, metrics.to_numpy(), color=["steelblue", "coral", "seagreen"])
+axes[2].bar_label(bars, fmt="%.1f")
+axes[2].set(title="The three averages compared", ylabel="km/h")
 
 plt.tight_layout()
 plt.show()
@@ -479,37 +438,29 @@ curve = collect("""
 
 spark.sql("""
     CREATE OR REPLACE TEMP VIEW congestion_ratio AS
-    SELECT dseg_id,
-           avg(CASE WHEN hour_utc BETWEEN 7 AND 9 OR hour_utc BETWEEN 16 AND 18
-                    THEN element_at(speed_percentiles_kph, 3) END)  AS peak_p15,
-           avg(CASE WHEN hour_utc >= 22 OR hour_utc <= 5
-                    THEN element_at(speed_percentiles_kph, 17) END) AS night_p85
-    FROM measured GROUP BY dseg_id
+    SELECT dseg_id, peak_p15 / night_p85 AS ratio
+    FROM (SELECT dseg_id,
+                 avg(CASE WHEN hour_utc BETWEEN 7 AND 9 OR hour_utc BETWEEN 16 AND 18
+                          THEN element_at(speed_percentiles_kph, 3) END)  AS peak_p15,
+                 avg(CASE WHEN hour_utc >= 22 OR hour_utc <= 5
+                          THEN element_at(speed_percentiles_kph, 17) END) AS night_p85
+          FROM measured GROUP BY dseg_id)
+    WHERE night_p85 > 0 AND peak_p15 IS NOT NULL
     """)
-
-ratios = histogram("congestion_ratio", "peak_p15 / night_p85", 0, 2, bins=50,
-                   where="night_p85 > 0 AND peak_p15 IS NOT NULL")
-median_ratio = float(spark.sql("""
-        SELECT round(percentile_approx(peak_p15 / night_p85, 0.5), 2) AS m
-        FROM congestion_ratio WHERE night_p85 > 0 AND peak_p15 IS NOT NULL
-        """).first().m)
+median_ratio = spark.sql("SELECT percentile_approx(ratio, 0.5) AS m FROM congestion_ratio").first().m
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
 ax1.plot(curve.position, curve.speed_kph, marker="o", color="steelblue", linewidth=2)
 ax1.fill_between(curve.position, curve.speed_kph, alpha=0.2, color="steelblue")
-ax1.set_title("Average speed percentile curve")
-ax1.set_xlabel("Percentile")
-ax1.set_ylabel("km/h")
-ax1.set_xticks(curve.position)
-ax1.set_xticklabels([f"p{p}" for p in range(5, 100, 5)], rotation=45)
+ax1.set(title="Average speed percentile curve", xlabel="Percentile", ylabel="km/h")
+ax1.set_xticks(curve.position, [f"p{p}" for p in range(5, 100, 5)], rotation=45)
 
-ax2.bar(ratios.value, ratios.rows, width=0.036, color="coral")
-ax2.axvline(1.0, color="black", linestyle="--", alpha=0.6, label="No slowdown")
+histogram(ax2, "congestion_ratio", "ratio", 0, 2, color="coral")
+ax2.axvline(1, color="black", linestyle="--", alpha=0.6, label="No slowdown")
 ax2.axvline(median_ratio, color="red", label=f"Median: {median_ratio:.2f}")
-ax2.set_title("Congestion severity: peak p15 over night p85")
-ax2.set_xlabel("Speed ratio (lower is more congested)")
-ax2.set_ylabel("Segments")
+ax2.set(title="Congestion severity: peak p15 over night p85",
+        xlabel="Speed ratio (lower is more congested)", ylabel="Segments")
 ax2.legend()
 
 plt.tight_layout()
@@ -536,41 +487,33 @@ plt.show()
 
 by_class_hour = collect("""
         SELECT hour_local, frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
-        FROM measured WHERE frc <= 4 AND speed_limit_kph > 0
-        GROUP BY 1, 2 ORDER BY 1, 2
+        FROM measured WHERE frc <= 4 GROUP BY 1, 2 ORDER BY 1, 2
         """)
-
-speeding = collect("""
-        SELECT hour_local, frc, is_weekend,
-               round(100.0 * avg(CASE WHEN element_at(speed_percentiles_kph, 17) > speed_limit_kph
-                                      THEN 1.0 ELSE 0.0 END), 1) AS speeding_pct
-        FROM measured
-        WHERE speed_limit_kph > 0 AND speed_percentiles_kph IS NOT NULL
-        GROUP BY 1, 2, 3
+speeding_by_hour = collect("""
+        SELECT is_weekend, hour_local, round(100.0 * avg(int(speeding)), 1) AS speeding_pct
+        FROM measured GROUP BY 1, 2 ORDER BY 1, 2
+        """)
+speeding_by_class = collect("""
+        SELECT frc, round(100.0 * avg(int(speeding)), 1) AS speeding_pct
+        FROM measured GROUP BY frc ORDER BY frc
         """)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
-for frc in sorted(by_class_hour.frc.unique()):
-    subset = by_class_hour[by_class_hour.frc == frc]
+for frc, subset in by_class_hour.groupby("frc"):
     ax1.plot(subset.hour_local, subset.speed_kph, marker="o", markersize=3,
              color=FRC_COLORS.get(frc), label=f"FRC {frc}")
 ax1.axvspan(7, 9, alpha=0.1, color="red")
 ax1.axvspan(16, 18, alpha=0.1, color="orange")
-ax1.set_title("Harmonic speed by local hour and road class")
-ax1.set_xlabel("Local hour (shaded: commute peaks)")
-ax1.set_ylabel("km/h")
-ax1.set_xticks(range(0, 24, 2))
+ax1.set(title="Harmonic speed by local hour and road class",
+        xlabel="Local hour (shaded: commute peaks)", ylabel="km/h", xticks=range(0, 24, 2))
 ax1.legend(fontsize=8)
 
-for weekend, color, label in [(False, "steelblue", "Weekday"), (True, "coral", "Weekend")]:
-    subset = speeding[speeding.is_weekend == weekend].groupby("hour_local").speeding_pct.mean()
-    if not subset.empty:
-        ax2.plot(subset.index, subset.values, marker="o", color=color, linewidth=2, label=label)
-ax2.set_title("Hours with p85 above the limit")
-ax2.set_xlabel("Local hour")
-ax2.set_ylabel("% of measured hours")
-ax2.set_xticks(range(0, 24, 2))
+for weekend, subset in speeding_by_hour.groupby("is_weekend"):
+    ax2.plot(subset.hour_local, subset.speeding_pct, marker="o", linewidth=2,
+             color="coral" if weekend else "steelblue", label="Weekend" if weekend else "Weekday")
+ax2.set(title="Hours with p85 above the limit", xlabel="Local hour",
+        ylabel="% of measured hours", xticks=range(0, 24, 2))
 ax2.legend()
 
 plt.tight_layout()
@@ -581,16 +524,12 @@ fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4.5), gridspec_kw={"width_rati
 grid = by_class_hour.pivot(index="frc", columns="hour_local", values="speed_kph")
 sns.heatmap(grid, ax=ax1, cmap="RdYlGn", cbar_kws={"label": "km/h"},
             yticklabels=[f"FRC {f}: {FRC_LABELS.get(f, '')}" for f in grid.index])
-ax1.set_title("Speed by road class and local hour")
-ax1.set_xlabel("Local hour")
-ax1.set_ylabel("")
+ax1.set(title="Speed by road class and local hour", xlabel="Local hour", ylabel="")
 
-by_frc_speeding = speeding.groupby("frc").speeding_pct.mean()
-ax2.bar(by_frc_speeding.index, by_frc_speeding.values,
-        color=[FRC_COLORS.get(f, "#999") for f in by_frc_speeding.index])
-ax2.set_title("Speeding prevalence by road class")
-ax2.set_xlabel("FRC (0 = motorway, 7 = local)")
-ax2.set_ylabel("% of measured hours")
+ax2.bar(speeding_by_class.frc, speeding_by_class.speeding_pct,
+        color=[FRC_COLORS.get(f, "#999") for f in speeding_by_class.frc])
+ax2.set(title="Speeding prevalence by road class", xlabel="FRC (0 = motorway, 7 = local)",
+        ylabel="% of measured hours")
 
 plt.tight_layout()
 plt.show()
@@ -617,17 +556,13 @@ plt.show()
 
 by_cell = collect(f"""
         WITH per_segment AS (
-            SELECT m.dseg_id, any_value(m.h3_r9) AS h3_r9, any_value(m.length_m) AS length_m,
-                   avg(m.harmonic_speed_kph) AS mean_speed_kph,
-                   100.0 * avg(CASE WHEN m.harmonic_speed_kph < 0.6 * m.speed_limit_kph
-                                    THEN 1.0 ELSE 0.0 END) AS congestion_pct,
-                   100.0 * avg(CASE WHEN element_at(m.speed_percentiles_kph, 17) > m.speed_limit_kph
-                                    THEN 1.0 ELSE 0.0 END) AS speeding_pct
-            FROM measured m JOIN {segments} s USING (dseg_id)
-            WHERE m.speed_limit_kph > 0
-              AND s.max_lon >= {AREA[0]} AND s.min_lon <= {AREA[2]}
-              AND s.max_lat >= {AREA[1]} AND s.min_lat <= {AREA[3]}
-            GROUP BY m.dseg_id HAVING count(m.speed_percentiles_kph) > 0
+            SELECT dseg_id, any_value(h3_r9) AS h3_r9, any_value(length_m) AS length_m,
+                   avg(harmonic_speed_kph) AS mean_speed_kph,
+                   100.0 * avg(int(congested)) AS congestion_pct,
+                   100.0 * avg(int(speeding))  AS speeding_pct
+            FROM measured
+            WHERE dseg_id IN (SELECT dseg_id FROM segments WHERE {overlaps(AREA)})
+            GROUP BY dseg_id HAVING count(speeding) > 0
         )
         SELECT h3_r9, count(*) AS segments,
                round(sum(congestion_pct * length_m) / sum(length_m), 1) AS congestion_pct_by_length,
@@ -641,17 +576,15 @@ by_cell = collect(f"""
 display(by_cell.head(25))
 
 chart = basemap(centre.lat, centre.lon, 12)
-scale = LinearColormap(
-    colors=["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"],
-    vmin=by_cell.congestion_pct_by_length.quantile(0.1),
-    vmax=by_cell.congestion_pct_by_length.quantile(0.9),
-    caption="Measured hours below 60% of the posted limit (%), weighted by length",
-)
+scale = LinearColormap(["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"],
+                       vmin=by_cell.congestion_pct_by_length.quantile(0.1),
+                       vmax=by_cell.congestion_pct_by_length.quantile(0.9),
+                       caption="Measured hours below 60% of the posted limit (%), weighted by length")
 
 for row in by_cell.itertuples():
-    color = scale(min(row.congestion_pct_by_length, scale.vmax))
+    color = scale(row.congestion_pct_by_length)
     folium.Polygon(
-        locations=h3.cell_to_boundary(row.h3_r9),
+        h3.cell_to_boundary(row.h3_r9),
         color=color, fill=True, fill_color=color, fill_opacity=0.6, weight=1,
         popup=folium.Popup(
             f"<b>H3 cell:</b> {row.h3_r9}<br>"

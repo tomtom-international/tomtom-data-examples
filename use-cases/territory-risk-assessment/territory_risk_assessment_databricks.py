@@ -35,25 +35,24 @@
 
 # COMMAND ----------
 
-from decimal import Decimal
-
 import folium
 import h3
-import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import seaborn as sns
+from pyspark.sql.types import DecimalType
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
+YLORRD = plt.get_cmap("YlOrRd")
 
 
 def collect(query):
-    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
-    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
-    frame = spark.sql(query).toPandas()
-    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
-    return frame.astype({c: float for c in decimals})
+    """Run a query into pandas. Spark types expressions built from literals such as `1.0` as
+    DECIMAL, which pandas receives as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query)
+    decimals = {f.name: float for f in frame.schema if isinstance(f.dataType, DecimalType)}
+    return frame.toPandas().astype(decimals)
 
 
 def basemap(lat, lon, zoom):
@@ -64,17 +63,12 @@ def basemap(lat, lon, zoom):
     ))
     return chart
 
-
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
-dbutils.widgets.text(
-    "volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog"
-)
+dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
 dbutils.widgets.text("observation_date", "2025-09-03", "Date to score, UTC")
-dbutils.widgets.text(
-    "region", "london", "Region: london, austin, losangeles or melbourne"
-)
+dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
@@ -142,27 +136,31 @@ display(spark.sql("SELECT * FROM exposure ORDER BY vehicle_km_per_day DESC LIMIT
 
 # COMMAND ----------
 
+# One row per segment-hour on the date, with the road attributes joined on. `speeding` is null
+# for a single-observation hour, so its average is a rate over the hours with a distribution.
 spark.sql(f"""
+    CREATE OR REPLACE TEMPORARY VIEW hours AS
+    SELECT s.dseg_id, s.h3_r9, s.length_m, s.speed_limit_kph, s.street_name, s.geometry_wkt,
+           s.osm_way_ids, h.harmonic_speed_kph, h.stddev_speed_kph, h.speed_percentiles_kph,
+           hour(from_utc_timestamp(timestampadd(HOUR, h.hour_utc, timestamp(h.observation_date)),
+                                   s.time_zone))                       AS hour_local,
+           element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph AS speeding,
+           h.harmonic_speed_kph < 0.6 * s.speed_limit_kph              AS congested,
+           h.speed_percentiles_kph IS NULL                             AS single_observation
+    FROM {stats}.segments s JOIN {stats}.hourly_stats h USING (dseg_id)
+    WHERE h.observation_date = DATE '{observation_date}' AND s.region = '{region}'
+      AND s.speed_limit_kph > 0 AND h.harmonic_speed_kph > 0
+    """)
+
+spark.sql("""
     CREATE OR REPLACE TEMPORARY VIEW severity AS
-    SELECT
-        s.h3_r9,
-        avg(h.harmonic_speed_kph)                          AS mean_speed_kph,
-        avg(h.stddev_speed_kph / h.harmonic_speed_kph)     AS variability,
-        avg(CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
-                 WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
-                 THEN 1.0 ELSE 0.0 END)                    AS speeding_rate,
-        avg(CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph
-                 THEN 1.0 ELSE 0.0 END)                    AS congestion_rate,
-        avg(CASE WHEN h.speed_percentiles_kph IS NULL
-                 THEN 1.0 ELSE 0.0 END)                    AS single_observation_rate
-    FROM {stats}.segments s
-    JOIN {stats}.hourly_stats h USING (dseg_id)
-    WHERE h.observation_date = DATE '{observation_date}'
-      AND s.region = '{region}'
-      AND s.speed_limit_kph > 0
-      AND h.harmonic_speed_kph > 0
-    GROUP BY s.h3_r9
-    HAVING count(h.speed_percentiles_kph) > 0
+    SELECT h3_r9,
+           avg(harmonic_speed_kph)                    AS mean_speed_kph,
+           avg(stddev_speed_kph / harmonic_speed_kph) AS variability,
+           avg(int(speeding))                         AS speeding_rate,
+           avg(int(congested))                        AS congestion_rate,
+           avg(int(single_observation))               AS single_observation_rate
+    FROM hours GROUP BY h3_r9 HAVING count(speeding) > 0
     """)
 
 display(spark.sql("""
@@ -194,29 +192,27 @@ display(spark.sql("""
 
 # COMMAND ----------
 
-spark.sql("""
+FACTORS = {  # factor: (column, weight)
+    "exposure": ("vehicle_km_per_day", 0.35),
+    "speed": ("mean_speed_kph", 0.20),
+    "variability": ("variability", 0.20),
+    "speeding": ("speeding_rate", 0.15),
+    "congestion": ("congestion_rate", 0.10),
+}
+parts = [f"{factor}_part" for factor in FACTORS]
+
+scaled = ", ".join(
+    f"{weight} * ({column} - min({column}) OVER ()) "
+    f"/ nullif(max({column}) OVER () - min({column}) OVER (), 0) AS {factor}_part"
+    for factor, (column, weight) in FACTORS.items()
+)
+
+spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW territory_risk AS
-    WITH cells AS (
-        SELECT e.h3_r9, e.vehicle_km_per_day, v.mean_speed_kph, v.variability,
-               v.speeding_rate, v.congestion_rate, v.single_observation_rate
+    WITH scored AS (
+        SELECT e.h3_r9, e.vehicle_km_per_day, v.mean_speed_kph, v.variability, v.speeding_rate,
+               v.congestion_rate, v.single_observation_rate, {scaled}
         FROM exposure e JOIN severity v USING (h3_r9)
-    ),
-    bounds AS (
-        SELECT min(vehicle_km_per_day) lo_e, max(vehicle_km_per_day) hi_e,
-               min(mean_speed_kph) lo_s, max(mean_speed_kph) hi_s,
-               min(variability) lo_v, max(variability) hi_v,
-               min(speeding_rate) lo_p, max(speeding_rate) hi_p,
-               min(congestion_rate) lo_c, max(congestion_rate) hi_c
-        FROM cells
-    ),
-    weighted AS (
-        SELECT c.*,
-               0.35 * (c.vehicle_km_per_day - b.lo_e) / nullif(b.hi_e - b.lo_e, 0) AS exposure_part,
-               0.20 * (c.mean_speed_kph  - b.lo_s) / nullif(b.hi_s - b.lo_s, 0)    AS speed_part,
-               0.20 * (c.variability     - b.lo_v) / nullif(b.hi_v - b.lo_v, 0)    AS variability_part,
-               0.15 * (c.speeding_rate   - b.lo_p) / nullif(b.hi_p - b.lo_p, 0)    AS speeding_part,
-               0.10 * (c.congestion_rate - b.lo_c) / nullif(b.hi_c - b.lo_c, 0)    AS congestion_part
-        FROM cells c CROSS JOIN bounds b
     )
     SELECT h3_r9, vehicle_km_per_day,
            round(mean_speed_kph, 1)                AS mean_speed_kph,
@@ -224,17 +220,13 @@ spark.sql("""
            round(100 * speeding_rate, 1)           AS speeding_pct,
            round(100 * congestion_rate, 1)         AS congestion_pct,
            round(100 * single_observation_rate, 1) AS single_observation_pct,
-           round(exposure_part + speed_part + variability_part + speeding_part + congestion_part, 3)
-                                                   AS risk_score,
-           round(exposure_part, 3)    AS exposure_part,
-           round(speed_part, 3)       AS speed_part,
-           round(variability_part, 3) AS variability_part,
-           round(speeding_part, 3)    AS speeding_part,
-           round(congestion_part, 3)  AS congestion_part
-    FROM weighted
+           round({" + ".join(parts)}, 3)           AS risk_score,
+           {", ".join(f"round({part}, 3) AS {part}" for part in parts)}
+    FROM scored
     """)
+spark.sql("CACHE TABLE territory_risk")
 
-# One row per scored cell. Everything below is drawn from this frame.
+# One row per scored cell. Everything below is drawn from this frame or the cached view.
 cells = collect("SELECT * FROM territory_risk")
 print(f"{len(cells):,} scored cells in {region} on {observation_date}")
 
@@ -249,20 +241,16 @@ display(spark.sql("""
 fig, axes = plt.subplots(2, 2, figsize=(13, 8))
 
 panels = [
-    ("vehicle_km_per_day", "Exposure (vehicle-km per day)", "steelblue", True),
-    ("variability", "Speed variability (std / mean)", "mediumpurple", False),
-    ("speeding_pct", "Hours with p85 above the limit (%)", "coral", False),
-    ("congestion_pct", "Hours below 60% of the limit (%)", "seagreen", False),
+    ("vehicle_km_per_day", "Exposure (vehicle-km per day)", "steelblue"),
+    ("variability", "Speed variability (std / mean)", "mediumpurple"),
+    ("speeding_pct", "Hours with p85 above the limit (%)", "coral"),
+    ("congestion_pct", "Hours below 60% of the limit (%)", "seagreen"),
 ]
-for ax, (column, title, color, log) in zip(axes.flat, panels):
-    values = cells[column].clip(upper=cells[column].quantile(0.99))
-    ax.hist(values, bins=50, color=color, edgecolor="white")
-    ax.set_title(title)
-    if log:
-        ax.set_yscale("log")
-        ax.set_ylabel("Cells (log scale)")
-    else:
-        ax.set_ylabel("Cells")
+for ax, (column, title, color) in zip(axes.flat, panels):
+    ax.hist(cells[column].clip(upper=cells[column].quantile(0.99)), bins=50, color=color,
+            edgecolor="white")
+    ax.set(title=title, ylabel="Cells")
+axes[0, 0].set(yscale="log", ylabel="Cells (log scale)")
 
 plt.suptitle(f"The four factors across {len(cells):,} cells, 99th percentile clipped",
              fontsize=13, fontweight="bold")
@@ -271,28 +259,20 @@ plt.show()
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
+median, p95 = cells.risk_score.quantile([0.5, 0.95])
 ax1.hist(cells.risk_score, bins=60, color="crimson", edgecolor="white")
-ax1.axvline(cells.risk_score.median(), color="black", linestyle="--",
-            label=f"Median: {cells.risk_score.median():.2f}")
-ax1.axvline(cells.risk_score.quantile(0.95), color="darkred",
-            label=f"95th percentile: {cells.risk_score.quantile(0.95):.2f}")
-ax1.set_title("Composite risk score")
-ax1.set_xlabel("Score (0 lowest, 1 highest)")
-ax1.set_ylabel("Cells")
+ax1.axvline(median, color="black", linestyle="--", label=f"Median: {median:.2f}")
+ax1.axvline(p95, color="darkred", label=f"95th percentile: {p95:.2f}")
+ax1.set(title="Composite risk score", xlabel="Score (0 lowest, 1 highest)", ylabel="Cells")
 ax1.legend()
 
 top = cells.nlargest(15, "risk_score")
-parts = [c for c in cells.columns if c.endswith("_part")]
-bottom = [0] * len(top)
-for part, color in zip(parts, ["#800026", "#e31a1c", "#fd8d3c", "#feb24c", "#ffeda0"]):
-    ax2.bar(range(len(top)), top[part], bottom=bottom, color=color,
-            label=part.replace("_part", ""))
-    bottom = [b + v for b, v in zip(bottom, top[part])]
-ax2.set_xticks(range(len(top)))
-ax2.set_xticklabels([f"{s:.0f}" for s in top.mean_speed_kph])
-ax2.set_xlabel("The 15 highest-scoring cells, labelled by mean speed in km/h")
-ax2.set_ylabel("Weighted contribution")
-ax2.set_title("What lifts the top cells")
+(top[parts].rename(columns=lambda part: part.removesuffix("_part"))
+    .set_axis(top.mean_speed_kph.round().astype(int))
+    .plot.bar(stacked=True, ax=ax2, rot=0, width=0.8,
+              color=["#800026", "#e31a1c", "#fd8d3c", "#feb24c", "#ffeda0"]))
+ax2.set(title="What lifts the top cells", ylabel="Weighted contribution",
+        xlabel="The 15 highest-scoring cells, labelled by mean speed in km/h")
 ax2.legend(fontsize=8)
 
 plt.tight_layout()
@@ -336,21 +316,19 @@ display(spark.sql("""
         ORDER BY mean_speed_kph DESC
         """))
 
-sample = cells[cells.vehicle_km_per_day > 0].sample(min(8000, len(cells)), random_state=0)
+busy = cells[cells.vehicle_km_per_day > 0]
+sample = busy.sample(min(8000, len(busy)), random_state=0)
 
 fig, ax = plt.subplots(figsize=(11, 6))
 points = ax.scatter(sample.mean_speed_kph, sample.vehicle_km_per_day, c=sample.risk_score,
-                    cmap="YlOrRd", s=6, alpha=0.5)
-ax.set_yscale("log")
-ax.set_xlabel("Mean speed (km/h)")
-ax.set_ylabel("Vehicle-km per day (log scale)")
+                    cmap=YLORRD, s=6, alpha=0.5)
+ax.set(yscale="log", xlabel="Mean speed (km/h)", ylabel="Vehicle-km per day (log scale)")
 ax.set_title(f"Exposure against speed, {len(sample):,} sampled cells in {region}",
              fontsize=13, fontweight="bold")
-ax.axvline(40, color="grey", linestyle=":", alpha=0.7)
-ax.axvline(80, color="grey", linestyle=":", alpha=0.7)
-ax.text(20, sample.vehicle_km_per_day.max(), "urban", ha="center", fontsize=9, color="grey")
-ax.text(60, sample.vehicle_km_per_day.max(), "arterial", ha="center", fontsize=9, color="grey")
-ax.text(100, sample.vehicle_km_per_day.max(), "motorway", ha="center", fontsize=9, color="grey")
+for x in (40, 80):
+    ax.axvline(x, color="grey", linestyle=":", alpha=0.7)
+for x, band in [(20, "urban"), (60, "arterial"), (100, "motorway")]:
+    ax.text(x, sample.vehicle_km_per_day.max(), band, ha="center", fontsize=9, color="grey")
 fig.colorbar(points, ax=ax, label="Risk score")
 plt.tight_layout()
 plt.show()
@@ -375,55 +353,47 @@ plt.show()
 
 MAP_RESOLUTION = 6
 
-cells["parent"] = [h3.cell_to_parent(c, MAP_RESOLUTION) for c in cells.h3_r9]
+cells["parent"] = [h3.cell_to_parent(cell, MAP_RESOLUTION) for cell in cells.h3_r9]
 cells["weighted_score"] = cells.risk_score * cells.vehicle_km_per_day
-
 area = cells.groupby("parent").agg(
-    vehicle_km_per_day=("vehicle_km_per_day", "sum"),
-    weighted_score=("weighted_score", "sum"),
-    mean_speed_kph=("mean_speed_kph", "mean"),
-    speeding_pct=("speeding_pct", "mean"),
-    cells_r9=("h3_r9", "count"),
+    vehicle_km_per_day=("vehicle_km_per_day", "sum"), weighted_score=("weighted_score", "sum"),
+    mean_speed_kph=("mean_speed_kph", "mean"), speeding_pct=("speeding_pct", "mean"),
+    cells_r9=("h3_r9", "size"),
 ).reset_index()
 area["risk_score"] = area.weighted_score / area.vehicle_km_per_day
-
+area["rank"] = area.risk_score.rank(pct=True)
 print(f"{len(area):,} hexagons at resolution {MAP_RESOLUTION}, "
       f"rolled up from {area.cells_r9.sum():,} scored cells")
 
-busiest = cells.nlargest(1, "vehicle_km_per_day").h3_r9.iloc[0]
-centre = h3.cell_to_latlng(busiest)
+busiest = cells.loc[cells.vehicle_km_per_day.idxmax(), "h3_r9"]
+chart = basemap(*h3.cell_to_latlng(busiest), 9)
 
-chart = basemap(centre[0], centre[1], 9)
-shade = cm.YlOrRd
-rank = area.risk_score.rank(pct=True)
-
-overview = folium.FeatureGroup(name=f"Region, resolution {MAP_RESOLUTION}")
-for row, value in zip(area.itertuples(), rank):
-    color = mcolors.to_hex(shade(value))
+overview = folium.FeatureGroup(name=f"Region, resolution {MAP_RESOLUTION}").add_to(chart)
+for row in area.itertuples():
+    color = mcolors.to_hex(YLORRD(row.rank))
     folium.Polygon(
-        locations=h3.cell_to_boundary(row.parent),
+        h3.cell_to_boundary(row.parent),
         color=color, fill=True, fill_color=color, fill_opacity=0.55, weight=1,
         tooltip=(f"score {row.risk_score:.2f}, {row.vehicle_km_per_day:,.0f} vehicle-km/day, "
                  f"{row.mean_speed_kph:.0f} km/h, speeding in {row.speeding_pct:.0f}% of hours, "
                  f"{row.cells_r9} scored cells"),
     ).add_to(overview)
-overview.add_to(chart)
 
 # The scored cells themselves, within 40 steps of the busiest one
-near = cells[cells.h3_r9.isin(set(h3.grid_disk(busiest, 40)))]
-detail = folium.FeatureGroup(name=f"Busiest area, resolution 9 ({len(near):,} cells)", show=False)
-norm = mcolors.Normalize(vmin=near.risk_score.min(), vmax=near.risk_score.max())
+near = cells[cells.h3_r9.isin(h3.grid_disk(busiest, 40))]
+detail = folium.FeatureGroup(name=f"Busiest area, resolution 9 ({len(near):,} cells)",
+                             show=False).add_to(chart)
+norm = mcolors.Normalize(near.risk_score.min(), near.risk_score.max())
 for row in near.itertuples():
-    color = mcolors.to_hex(shade(norm(row.risk_score)))
+    color = mcolors.to_hex(YLORRD(norm(row.risk_score)))
     folium.Polygon(
-        locations=h3.cell_to_boundary(row.h3_r9),
+        h3.cell_to_boundary(row.h3_r9),
         color=color, fill=True, fill_color=color, fill_opacity=0.6, weight=0.5,
         tooltip=(f"{row.h3_r9}<br>score {row.risk_score:.2f}<br>"
                  f"{row.vehicle_km_per_day:,.0f} vehicle-km/day<br>"
                  f"{row.mean_speed_kph:.0f} km/h, speeding {row.speeding_pct:.0f}%, "
                  f"congested {row.congestion_pct:.0f}%"),
     ).add_to(detail)
-detail.add_to(chart)
 
 folium.LayerControl(collapsed=False).add_to(chart)
 display(chart)
@@ -455,32 +425,17 @@ MATCHED_OSM_WAYS = [4394118, 4394117]
 
 spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW route_hours AS
-    SELECT s.dseg_id, s.length_m, s.speed_limit_kph, s.street_name, s.geometry_wkt,
-           h.harmonic_speed_kph, h.speed_percentiles_kph,
-           hour(from_utc_timestamp(make_timestamp(year(h.observation_date), month(h.observation_date),
-                                                  day(h.observation_date), h.hour_utc, 0, 0),
-                                   s.time_zone))                                          AS hour_local,
-           CASE WHEN h.speed_percentiles_kph IS NULL THEN NULL
-                WHEN element_at(h.speed_percentiles_kph, 17) > s.speed_limit_kph
-                THEN 1.0 ELSE 0.0 END                                                     AS speeding,
-           CASE WHEN h.harmonic_speed_kph < 0.6 * s.speed_limit_kph THEN 1.0 ELSE 0.0 END AS congested,
-           CASE WHEN h.speed_percentiles_kph IS NULL THEN 1.0 ELSE 0.0 END                AS single_observation
-    FROM {stats}.segments s
-    JOIN {stats}.hourly_stats h USING (dseg_id)
-    WHERE arrays_overlap(s.osm_way_ids, array({", ".join(f"{w}L" for w in MATCHED_OSM_WAYS)}))
-      AND s.region = '{region}'
-      AND s.speed_limit_kph > 0
-      AND h.observation_date = DATE '{observation_date}'
-      AND h.harmonic_speed_kph > 0
+    SELECT * FROM hours
+    WHERE arrays_overlap(osm_way_ids, array({", ".join(f"{way}L" for way in MATCHED_OSM_WAYS)}))
     """)
 
 spark.sql("""
     CREATE OR REPLACE TEMPORARY VIEW route_segments AS
     SELECT dseg_id, any_value(street_name) AS street_name, any_value(geometry_wkt) AS geometry_wkt,
            any_value(length_m) AS length_m, any_value(speed_limit_kph) AS speed_limit_kph,
-           avg(harmonic_speed_kph) AS mean_speed_kph, avg(speeding) AS speeding_rate,
-           avg(congested) AS congestion_rate, avg(single_observation) AS single_observation_rate
-    FROM route_hours GROUP BY dseg_id HAVING count(speed_percentiles_kph) > 0
+           avg(harmonic_speed_kph) AS mean_speed_kph, avg(int(speeding)) AS speeding_rate,
+           avg(int(congested)) AS congestion_rate, avg(int(single_observation)) AS single_observation_rate
+    FROM route_hours GROUP BY dseg_id HAVING count(speeding) > 0
     """)
 
 display(spark.sql("""
@@ -530,23 +485,19 @@ ax.plot(profile.hour_local, profile.harmonic_mean, marker="o", color="steelblue"
         label="Harmonic mean")
 ax.plot(profile.hour_local, profile.speed_limit, linestyle="--", color="black",
         label="Speed limit")
-ax.set_xlabel("Local hour")
-ax.set_ylabel("km/h")
+ax.set(xlabel="Local hour", ylabel="km/h", xticks=range(0, 24, 2))
 ax.set_title(f"The route through {observation_date}", fontsize=13, fontweight="bold")
-ax.set_xticks(range(0, 24, 2))
 ax.legend()
 plt.tight_layout()
 plt.show()
 
-centre_point = wkt.loads(route.geometry_wkt.iloc[len(route) // 2]).coords[0]
-
-chart = basemap(centre_point[1], centre_point[0], 11)
-norm = mcolors.Normalize(vmin=0, vmax=1)
+centre_lon, centre_lat = wkt.loads(route.geometry_wkt.iloc[len(route) // 2]).coords[0]
+chart = basemap(centre_lat, centre_lon, 11)
 
 for row in route.itertuples():
     folium.PolyLine(
         [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
-        color=mcolors.to_hex(cm.YlOrRd(norm(row.speeding_rate))), weight=4, opacity=0.9,
+        color=mcolors.to_hex(YLORRD(row.speeding_rate)), weight=4, opacity=0.9,
         tooltip=(f"{row.street_name or 'unnamed'} | "
                  f"speeding in {100 * row.speeding_rate:.0f}% of hours | "
                  f"{row.mean_speed_kph:.0f} km/h against a {row.speed_limit_kph:.0f} limit | "
