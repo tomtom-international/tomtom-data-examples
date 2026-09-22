@@ -74,6 +74,8 @@
 
 # COMMAND ----------
 
+from decimal import Decimal
+
 import folium
 import h3
 import matplotlib.cm as cm
@@ -86,6 +88,14 @@ from matplotlib.collections import LineCollection
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
+
+
+def collect(query):
+    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
+    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query).toPandas()
+    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
+    return frame.astype({c: float for c in decimals})
 
 
 def basemap(lat, lon, zoom):
@@ -188,7 +198,7 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-cov = spark.sql(f"""
+cov = collect(f"""
         SELECT frc, frc_label, frc_key,
                round(total_length_m / 1000, 1)   AS total_km,
                round(covered_length_m / 1000, 1) AS covered_km,
@@ -196,7 +206,7 @@ cov = spark.sql(f"""
         FROM {coverage}
         WHERE region = '{region}' AND vintage_year = {vintage_year}
         ORDER BY frc
-        """).toPandas()
+        """)
 
 display(cov)
 
@@ -236,13 +246,13 @@ plt.show()
 
 # COMMAND ----------
 
-by_class = spark.sql("""
+by_class = collect("""
         SELECT frc, count(*) AS segments,
-               percentile_approx(aadt, array(0.05, 0.25, 0.5, 0.75, 0.95)) AS quantiles,
+               percentile_approx(cast(aadt AS DOUBLE), array(0.05, 0.25, 0.5, 0.75, 0.95)) AS quantiles,
                round(100.0 * sum(aadt * length_m) / sum(sum(aadt * length_m)) OVER (), 1)
                                                    AS pct_of_vehicle_km
         FROM segments GROUP BY frc ORDER BY frc
-        """).toPandas()
+        """)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5))
 
@@ -291,13 +301,13 @@ plt.show()
 
 PROFILE_CLASSES = [0, 2, 4, 7]
 
-profile = spark.sql(f"""
+profile = collect(f"""
         SELECT frc, floor(pos / 24) AS day_index, pos % 24 AS hour_of_day,
                avg(hour_aadt) AS mean_hour_aadt
         FROM segments LATERAL VIEW posexplode(aadt_by_day_hour) t AS pos, hour_aadt
         WHERE frc IN ({", ".join(str(f) for f in PROFILE_CLASSES)})
         GROUP BY 1, 2, 3
-        """).toPandas()
+        """)
 
 DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
@@ -365,14 +375,14 @@ focus = spark.sql("""
 AREA = (focus.lon - 0.12, focus.lat - 0.06, focus.lon + 0.12, focus.lat + 0.06)
 MAX_SEGMENTS_ON_MAP = 4000
 
-box = spark.sql(f"""
+box = collect(f"""
         SELECT geometry_wkt, aadt, frc
         FROM segments
         WHERE max_lon >= {AREA[0]} AND min_lon <= {AREA[2]}
           AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
         ORDER BY aadt DESC
         LIMIT {MAX_SEGMENTS_ON_MAP}
-        """).toPandas()
+        """)
 
 print(f"{len(box):,} busiest segments in {AREA}")
 
@@ -405,14 +415,14 @@ plt.show()
 
 CBD = (focus.lon - 0.02, focus.lat - 0.012, focus.lon + 0.02, focus.lat + 0.012)
 
-cbd = spark.sql(f"""
+cbd = collect(f"""
         SELECT segment_id, frc, aadt, osm_id, aadt_by_day, geometry_wkt
         FROM segments
         WHERE max_lon >= {CBD[0]} AND min_lon <= {CBD[2]}
           AND max_lat >= {CBD[1]} AND min_lat <= {CBD[3]}
         ORDER BY aadt DESC
         LIMIT 1500
-        """).toPandas()
+        """)
 
 print(f"{len(cbd):,} segments in the centre box")
 
@@ -462,7 +472,7 @@ display(chart)
 
 # COMMAND ----------
 
-cells = spark.sql(f"""
+cells = collect(f"""
         SELECT h3_r9,
                count(*)                           AS segments,
                round(sum(aadt * length_m) / 1000) AS vehicle_km_per_day,
@@ -474,7 +484,7 @@ cells = spark.sql(f"""
           AND (min_lat + max_lat) / 2 BETWEEN {AREA[1]} AND {AREA[3]}
         GROUP BY h3_r9
         ORDER BY vehicle_km_per_day DESC
-        """).toPandas()
+        """)
 
 display(cells.head(25))
 

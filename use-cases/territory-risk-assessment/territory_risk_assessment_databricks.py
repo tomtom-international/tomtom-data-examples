@@ -35,6 +35,8 @@
 
 # COMMAND ----------
 
+from decimal import Decimal
+
 import folium
 import h3
 import matplotlib.cm as cm
@@ -44,6 +46,14 @@ import seaborn as sns
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
+
+
+def collect(query):
+    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
+    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query).toPandas()
+    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
+    return frame.astype({c: float for c in decimals})
 
 
 def basemap(lat, lon, zoom):
@@ -225,7 +235,7 @@ spark.sql("""
     """)
 
 # One row per scored cell. Everything below is drawn from this frame.
-cells = spark.sql("SELECT * FROM territory_risk").toPandas()
+cells = collect("SELECT * FROM territory_risk")
 print(f"{len(cells):,} scored cells in {region} on {observation_date}")
 
 display(spark.sql("""
@@ -495,7 +505,7 @@ display(spark.sql("""
 
 # COMMAND ----------
 
-route = spark.sql("SELECT * FROM route_segments").toPandas()
+route = collect("SELECT * FROM route_segments")
 
 if route.empty:
     raise ValueError(
@@ -504,14 +514,14 @@ if route.empty:
         f"way IDs from your own matched trace in MATCHED_OSM_WAYS."
     )
 
-profile = spark.sql("""
+profile = collect("""
         SELECT hour_local,
                round(avg(harmonic_speed_kph), 1)                    AS harmonic_mean,
                round(avg(element_at(speed_percentiles_kph, 17)), 1) AS p85,
                round(avg(element_at(speed_percentiles_kph, 3)), 1)  AS p15,
                round(avg(speed_limit_kph), 1)                       AS speed_limit
         FROM route_hours GROUP BY hour_local ORDER BY hour_local
-        """).toPandas()
+        """)
 
 fig, ax = plt.subplots(figsize=(11, 5))
 ax.fill_between(profile.hour_local, profile.p15, profile.p85, alpha=0.2, color="steelblue",

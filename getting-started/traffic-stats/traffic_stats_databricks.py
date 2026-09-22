@@ -75,19 +75,31 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install folium==0.20.0 shapely==2.1.2
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2 h3==4.5.0
 
 # COMMAND ----------
 
+from decimal import Decimal
+
 import folium
+import h3
 import matplotlib.colors as mcolors
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
+from branca.colormap import LinearColormap
 from matplotlib.collections import LineCollection
 from shapely import wkt
 
 sns.set_theme(style="whitegrid", palette="colorblind")
+
+
+def collect(query):
+    """Run a query into pandas. Spark types any expression built from a literal such as `1.0`
+    as DECIMAL, and those arrive as decimal.Decimal objects that matplotlib cannot plot."""
+    frame = spark.sql(query).toPandas()
+    decimals = [c for c in frame.columns if frame[c].map(lambda v: isinstance(v, Decimal)).any()]
+    return frame.astype({c: float for c in decimals})
 
 
 def basemap(lat, lon, zoom):
@@ -111,14 +123,14 @@ FRC_COLORS = {
 
 def histogram(source, expr, lo, hi, bins=50, where="TRUE"):
     """Bucket counts computed in Spark, so no per-row data reaches the driver."""
-    return spark.sql(f"""
+    return collect(f"""
         SELECT {lo} + ({hi} - {lo}) * (bucket + 0.5) / {bins} AS value, count(*) AS rows
         FROM (
             SELECT least({bins} - 1, greatest(0, floor(({expr} - {lo}) * {bins} / ({hi} - {lo})))) AS bucket
             FROM {source} WHERE {where} AND {expr} IS NOT NULL
         )
         GROUP BY bucket ORDER BY bucket
-        """).toPandas()
+        """)
 
 # COMMAND ----------
 
@@ -232,13 +244,13 @@ display(spark.sql(f"""
 
 # COMMAND ----------
 
-frc_counts = spark.sql(f"SELECT frc, count(*) AS segments FROM {segments} GROUP BY frc ORDER BY frc").toPandas()
+frc_counts = collect(f"SELECT frc, count(*) AS segments FROM {segments} GROUP BY frc ORDER BY frc")
 limits = histogram(segments, "speed_limit_kph", 0, 140, bins=28)
 lengths = histogram(segments, "length_m", 0, 500, bins=50)
-fow = spark.sql(f"""
+fow = collect(f"""
         SELECT form_of_way, count(*) AS segments FROM {segments}
         GROUP BY form_of_way ORDER BY segments DESC LIMIT 8
-        """).toPandas()
+        """)
 
 fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
@@ -275,10 +287,10 @@ plt.show()
 
 # COMMAND ----------
 
-overview = spark.sql(f"""
+overview = collect(f"""
         SELECT geometry_wkt, frc FROM {segments} WHERE frc <= 4
         ORDER BY frc, length_m DESC LIMIT 25000
-        """).toPandas()
+        """)
 
 lines = [list(wkt.loads(g).coords) for g in overview.geometry_wkt]
 mid_lat = np.mean([c[0][1] for c in lines])
@@ -301,14 +313,14 @@ plt.show()
 centre = spark.sql(f"SELECT avg(min_lon) AS lon, avg(min_lat) AS lat FROM {segments}").first()
 AREA = (centre.lon - 0.12, centre.lat - 0.06, centre.lon + 0.12, centre.lat + 0.06)
 
-major = spark.sql(f"""
+major = collect(f"""
         SELECT geometry_wkt, frc, street_name, speed_limit_kph
         FROM {segments}
         WHERE frc <= 3
           AND max_lon >= {AREA[0]} AND min_lon <= {AREA[2]}
           AND max_lat >= {AREA[1]} AND min_lat <= {AREA[3]}
         LIMIT 4000
-        """).toPandas()
+        """)
 
 chart = basemap(centre.lat, centre.lon, 12)
 
@@ -342,7 +354,7 @@ display(chart)
 
 # COMMAND ----------
 
-by_frc = spark.sql(f"""
+by_frc = collect(f"""
         WITH observed AS (SELECT dseg_id, count(*) AS hours FROM measured GROUP BY dseg_id)
         SELECT s.frc, count(*) AS segments, round(sum(s.length_m) / 1000) AS network_km,
                round(avg(s.speed_limit_kph), 1)              AS avg_speed_limit_kph,
@@ -350,18 +362,18 @@ by_frc = spark.sql(f"""
                round(avg(o.hours), 1)                        AS avg_hours_measured
         FROM {segments} s LEFT JOIN observed o USING (dseg_id)
         GROUP BY s.frc ORDER BY s.frc
-        """).toPandas()
+        """)
 
 display(by_frc)
 
 active = spark.sql("SELECT count(DISTINCT dseg_id) AS n FROM measured").first().n
-by_hour = spark.sql(f"""
+by_hour = collect(f"""
         SELECT hour_utc,
                round(100.0 * count(DISTINCT dseg_id) / {active}, 1) AS pct_reporting,
                round(100.0 * avg(CASE WHEN speed_percentiles_kph IS NULL THEN 1 ELSE 0 END), 1)
                    AS pct_single_observation
         FROM measured GROUP BY hour_utc ORDER BY hour_utc
-        """).toPandas()
+        """)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
@@ -402,16 +414,16 @@ plt.show()
 # COMMAND ----------
 
 speeds = histogram("measured", "avg_speed_kph", 0, 150, bins=60)
-sample = spark.sql("""
+sample = collect("""
         SELECT frc, least(avg_speed_kph, 150) AS avg_speed_kph FROM measured
         WHERE frc <= 4 AND rand() < 0.02 LIMIT 150000
-        """).toPandas()
-metrics = spark.sql("""
+        """)
+metrics = collect("""
         SELECT round(avg(avg_speed_kph), 1)      AS arithmetic,
                round(avg(median_speed_kph), 1)   AS median,
                round(avg(harmonic_speed_kph), 1) AS harmonic
         FROM measured
-        """).toPandas().iloc[0]
+        """).iloc[0]
 
 fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
 
@@ -458,12 +470,12 @@ plt.show()
 
 # COMMAND ----------
 
-curve = spark.sql("""
+curve = collect("""
         SELECT pos + 1 AS position, round(avg(value), 1) AS speed_kph
         FROM measured LATERAL VIEW posexplode(speed_percentiles_kph) t AS pos, value
         WHERE speed_percentiles_kph IS NOT NULL
         GROUP BY pos ORDER BY pos
-        """).toPandas()
+        """)
 
 spark.sql("""
     CREATE OR REPLACE TEMP VIEW congestion_ratio AS
@@ -477,10 +489,10 @@ spark.sql("""
 
 ratios = histogram("congestion_ratio", "peak_p15 / night_p85", 0, 2, bins=50,
                    where="night_p85 > 0 AND peak_p15 IS NOT NULL")
-median_ratio = spark.sql("""
+median_ratio = float(spark.sql("""
         SELECT round(percentile_approx(peak_p15 / night_p85, 0.5), 2) AS m
         FROM congestion_ratio WHERE night_p85 > 0 AND peak_p15 IS NOT NULL
-        """).first().m
+        """).first().m)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
@@ -522,20 +534,20 @@ plt.show()
 
 # COMMAND ----------
 
-by_class_hour = spark.sql("""
+by_class_hour = collect("""
         SELECT hour_local, frc, round(avg(harmonic_speed_kph), 1) AS speed_kph
         FROM measured WHERE frc <= 4 AND speed_limit_kph > 0
         GROUP BY 1, 2 ORDER BY 1, 2
-        """).toPandas()
+        """)
 
-speeding = spark.sql("""
+speeding = collect("""
         SELECT hour_local, frc, is_weekend,
                round(100.0 * avg(CASE WHEN element_at(speed_percentiles_kph, 17) > speed_limit_kph
                                       THEN 1.0 ELSE 0.0 END), 1) AS speeding_pct
         FROM measured
         WHERE speed_limit_kph > 0 AND speed_percentiles_kph IS NOT NULL
         GROUP BY 1, 2, 3
-        """).toPandas()
+        """)
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 4.5))
 
@@ -594,28 +606,65 @@ plt.show()
 # MAGIC join is one string comparison.
 # MAGIC
 # MAGIC Weight by length when you aggregate. A 2 km motorway section should not count the same
-# MAGIC as a 30 m slip road. The cells below are the ones that spend most of the day congested,
-# MAGIC taking congestion as an hour below 60% of the posted limit.
+# MAGIC as a 30 m slip road.
+# MAGIC
+# MAGIC The map shades each cell by the share of its measured hours spent below 60% of the posted
+# MAGIC limit, weighted by length, over the same box as section 2. Congestion is a property of a
+# MAGIC place rather than of a road, so it reads better on cells than on segments: a junction shows
+# MAGIC up as one dark hexagon instead of a dozen short lines. Click a cell for its other figures.
 
 # COMMAND ----------
 
-display(spark.sql("""
+by_cell = collect(f"""
         WITH per_segment AS (
-            SELECT dseg_id, any_value(h3_r9) AS h3_r9, any_value(length_m) AS length_m,
-                   100.0 * avg(CASE WHEN harmonic_speed_kph < 0.6 * speed_limit_kph
+            SELECT m.dseg_id, any_value(m.h3_r9) AS h3_r9, any_value(m.length_m) AS length_m,
+                   avg(m.harmonic_speed_kph) AS mean_speed_kph,
+                   100.0 * avg(CASE WHEN m.harmonic_speed_kph < 0.6 * m.speed_limit_kph
                                     THEN 1.0 ELSE 0.0 END) AS congestion_pct,
-                   100.0 * avg(CASE WHEN element_at(speed_percentiles_kph, 17) > speed_limit_kph
+                   100.0 * avg(CASE WHEN element_at(m.speed_percentiles_kph, 17) > m.speed_limit_kph
                                     THEN 1.0 ELSE 0.0 END) AS speeding_pct
-            FROM measured WHERE speed_limit_kph > 0
-            GROUP BY dseg_id HAVING count(speed_percentiles_kph) > 0
+            FROM measured m JOIN {segments} s USING (dseg_id)
+            WHERE m.speed_limit_kph > 0
+              AND s.max_lon >= {AREA[0]} AND s.min_lon <= {AREA[2]}
+              AND s.max_lat >= {AREA[1]} AND s.min_lat <= {AREA[3]}
+            GROUP BY m.dseg_id HAVING count(m.speed_percentiles_kph) > 0
         )
         SELECT h3_r9, count(*) AS segments,
                round(sum(congestion_pct * length_m) / sum(length_m), 1) AS congestion_pct_by_length,
                round(sum(speeding_pct * length_m) / sum(length_m), 1)   AS speeding_pct_by_length,
+               round(sum(mean_speed_kph * length_m) / sum(length_m), 1) AS mean_speed_kph,
                round(sum(length_m) / 1000, 2)                           AS network_km
         FROM per_segment GROUP BY h3_r9 HAVING count(*) >= 3
-        ORDER BY congestion_pct_by_length DESC LIMIT 25
-        """))
+        ORDER BY congestion_pct_by_length DESC
+        """)
+
+display(by_cell.head(25))
+
+chart = basemap(centre.lat, centre.lon, 12)
+scale = LinearColormap(
+    colors=["#ffffcc", "#fd8d3c", "#e31a1c", "#800026"],
+    vmin=by_cell.congestion_pct_by_length.quantile(0.1),
+    vmax=by_cell.congestion_pct_by_length.quantile(0.9),
+    caption="Measured hours below 60% of the posted limit (%), weighted by length",
+)
+
+for row in by_cell.itertuples():
+    color = scale(min(row.congestion_pct_by_length, scale.vmax))
+    folium.Polygon(
+        locations=h3.cell_to_boundary(row.h3_r9),
+        color=color, fill=True, fill_color=color, fill_opacity=0.6, weight=1,
+        popup=folium.Popup(
+            f"<b>H3 cell:</b> {row.h3_r9}<br>"
+            f"<b>Congested:</b> {row.congestion_pct_by_length:.0f}% of hours<br>"
+            f"<b>Speeding:</b> {row.speeding_pct_by_length:.0f}% of hours<br>"
+            f"<b>Mean speed:</b> {row.mean_speed_kph:.0f} km/h<br>"
+            f"<b>Network:</b> {row.network_km:,.2f} km over {row.segments} segments",
+            max_width=260,
+        ),
+    ).add_to(chart)
+
+scale.add_to(chart)
+display(chart)
 
 # COMMAND ----------
 
