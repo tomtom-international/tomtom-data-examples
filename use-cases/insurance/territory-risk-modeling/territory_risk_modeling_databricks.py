@@ -100,7 +100,6 @@ dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 dbutils.widgets.text("first_date", "2025-09-01", "First Traffic Stats date, UTC")
 dbutils.widgets.text("last_date", "2025-09-07", "Last Traffic Stats date, UTC")
 dbutils.widgets.dropdown("postcode_level", "sector", ["sector", "district"], "Postcode level")
-dbutils.widgets.text("cell_table", "", "Optional table to cache the map cells in")
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
 volumes = dbutils.widgets.get("volumes_catalog") + ".traffic_volumes"
@@ -108,7 +107,6 @@ vintage_year = int(dbutils.widgets.get("vintage_year"))
 first_date = dbutils.widgets.get("first_date")
 last_date = dbutils.widgets.get("last_date")
 postcode_level = dbutils.widgets.get("postcode_level")
-cell_table = dbutils.widgets.get("cell_table").strip()
 
 REGION = "london"  # the collisions and postcodes are British, so the region is fixed
 
@@ -139,6 +137,11 @@ for schema in (stats, volumes):
 # MAGIC
 # MAGIC The summary shows how much of the network each dataset reaches. Nothing is filled in where
 # MAGIC they fall short; that gap becomes a feature later.
+# MAGIC
+# MAGIC The dates default to the first week of September. The sample holds two months, and
+# MAGIC reading all of it measures about 5% more map cells, mostly quiet roads that need longer to
+# MAGIC collect enough vehicles. The results in section 3 do not change, so one week is the
+# MAGIC cheaper default.
 
 # COMMAND ----------
 
@@ -209,12 +212,7 @@ spark.sql(f"""
                FROM road_signals GROUP BY h3_r9) s USING (h3_r9)
     """)
 
-if cell_table and spark.catalog.tableExists(cell_table):
-    cells = collect(f"SELECT * FROM {cell_table}")
-else:
-    if cell_table:
-        spark.sql(f"CREATE OR REPLACE TABLE {cell_table} AS SELECT * FROM cell_layer")
-    cells = collect("SELECT * FROM cell_layer")
+cells = collect("SELECT * FROM cell_layer")
 
 has_volume, has_speed = cells.vehicle_km_per_day.notna(), cells.mean_speed_kph.notna()
 display(pd.DataFrame({
@@ -485,6 +483,14 @@ models, predictions, frequency = run("collisions", train, test)
 _, _, severity = run("ksi", train, test)
 display(frequency.join(severity.deviance_explained_pct.rename("serious_only_pct")).round(3))
 
+# For scale: each postcode's own rate over both years, test months included. No model can know
+# that much, so this is a generous ceiling on what monthly counts allow.
+own_rate = (panel.groupby("postcode").collisions.sum()
+            + panel.groupby("postcode").prior_collisions.first()) / 24
+ceiling = score(test.collisions, test.postcode.map(own_rate).clip(lower=1e-3).values,
+                train.collisions.mean())
+print(f"Ceiling: {ceiling['deviance_explained_pct']:.0f}% of deviance explained")
+
 # COMMAND ----------
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5.5), gridspec_kw={"width_ratios": [1, 1.15]})
@@ -534,6 +540,27 @@ for keep_rows, hold_rows in GroupKFold(n_splits=5).split(panel, groups=blocks):
 
 print("Deviance explained (%) over five held-out map blocks:")
 display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC Read the results the way an insurer would, starting from the model you already have.
+# MAGIC
+# MAGIC **With a claims history, road data adds a little.** About two points on held-out months
+# MAGIC and one on held-out territory. That is small, and it should be. Most of the change in a
+# MAGIC postcode's count from one month to the next is chance, and the ceiling above shows how
+# MAGIC little room there is. A model that already knows each postcode's history is close to it.
+# MAGIC
+# MAGIC **Without a history, road data does most of the work.** It takes the model from about 10%
+# MAGIC to about 28%, nearly as far as a full year of claims gets it. That is the position of a new
+# MAGIC territory, a new postcode or a thin book, where history is exactly what is missing.
+# MAGIC
+# MAGIC **For serious collisions, road data beats the history.** Severity follows speed, which the
+# MAGIC road data measures and last year's count does not.
+# MAGIC
+# MAGIC The held-out blocks rank the four models the same way, so the gain is not the model
+# MAGIC memorising places. Your numbers will move a little with the library versions; the order
+# MAGIC should not.
 
 # COMMAND ----------
 
@@ -679,14 +706,13 @@ plt.show()
 
 # MAGIC %md
 # MAGIC Three ways to take this further. Feed the model your own claims, with policies in force
-# MAGIC as the exposure. Widen the two date widgets, because the sample holds two months, which
-# MAGIC is enough to build the features by month and watch seasons and roadworks move them. And
-# MAGIC keep the map cells from section 1, because they
-# MAGIC are already a road-level view for address-level quotes or telematics scoring, which the
-# MAGIC `territory-risk-assessment` notebook picks up.
+# MAGIC as the exposure. Build the features by month once the claims are monthly too, which is
+# MAGIC where more than a week of traffic starts to pay. And keep the map cells from section 1,
+# MAGIC because they are already a road-level view for address-level quotes or telematics
+# MAGIC scoring, which the `territory-risk-assessment` notebook picks up.
 # MAGIC
 # MAGIC **Getting the full data.** The Marketplace samples hold two months of traffic across four
-# MAGIC metropolitan areas. That is enough to measure what the features are worth. It is not
-# MAGIC enough to rate on. A commercial extract covers the markets you write, refreshes monthly,
-# MAGIC and reaches back far enough to sit alongside your claims history. Ask for one at
+# MAGIC metropolitan areas. That is enough to measure what the features are worth, which is what
+# MAGIC this notebook does. It is not enough to rate on. A commercial extract can cover the
+# MAGIC markets you write and the years your claims cover. Ask for one at
 # MAGIC `marketplacesupport@tomtom.com`.

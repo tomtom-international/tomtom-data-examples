@@ -7,14 +7,16 @@
 # MAGIC An insurer rating territory by postcode is averaging a motorway together with a
 # MAGIC cul-de-sac. One rating has to cover both, and it describes neither.
 # MAGIC
-# MAGIC Two ingredients fix that. Traffic volume says how many vehicles are there to collide.
-# MAGIC Speed says how hard they would hit, and how the road is driven. Neither is a risk model
-# MAGIC on its own, so this notebook builds both, scores areas of a few city blocks, and then
-# MAGIC runs the same recipe over the roads of one driver's trip.
+# MAGIC Two measurements of the roads themselves get closer. Traffic volume says how many
+# MAGIC vehicles are there to collide. Speed says how hard they would hit, and how the road is
+# MAGIC driven. Neither is a risk model on its own, so this notebook builds both, scores areas of a
+# MAGIC few city blocks, and then runs the same recipe over the roads of one driver's trip.
 # MAGIC
 # MAGIC **What you need.** Both free samples from Databricks Marketplace: TomTom Traffic Stats,
 # MAGIC hourly speeds per road, and TomTom Traffic Volumes, average daily traffic per road. They
-# MAGIC cover the same four metropolitan areas, and the `region` widget picks one.
+# MAGIC cover the same four metropolitan areas, and the `region` widget picks one. The notebook
+# MAGIC scores one day, which keeps a full run to about ten minutes on serverless.
+
 # COMMAND ----------
 
 # MAGIC %pip install folium==0.20.0 h3==4.5.0 shapely==2.1.2
@@ -482,11 +484,15 @@ display(chart)
 # MAGIC
 # MAGIC ## Where to take it next
 # MAGIC
+# MAGIC - **Measure the factors before trusting the weights.** The `territory-risk-modeling`
+# MAGIC   notebook puts the same kind of road features into a claims model and shows how much they
+# MAGIC   add, and where.
 # MAGIC - **Score frequency and severity separately.** The factor columns are already there.
 # MAGIC - **Rank or log-scale exposure** before weighting it, for the reason in section 3.
 # MAGIC - **Weight a route by time rather than distance.** A congested kilometre carries more
 # MAGIC   exposure than a clear one, and `aadt_by_day_hour` holds the hourly weights.
 # MAGIC - **Check coverage first.** `traffic_volumes.coverage` gives the share of each road class
 # MAGIC   with an estimate. A road without one is missing, not empty.
-# MAGIC - **Separate weekdays from weekends.** The default score uses one date, and the two
-# MAGIC   patterns hide each other.
+# MAGIC - **Compare days.** The default score uses one Wednesday. The sample runs from
+# MAGIC   1 September to 31 October 2025, so set `observation_date` to a Sunday, or to a day in
+# MAGIC   October, and see which cells move.

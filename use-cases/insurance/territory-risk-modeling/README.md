@@ -22,8 +22,9 @@ the data covers.
 The notebook then trains the same model four ways: on the size of the postcode alone, with
 road data, with past claims, and with both. Comparing them shows what road data adds to a
 model that already knows the claims history. It also shows how far road data gets you where
-there is no history at all. The notebook reports which signals mattered most, and ends with
-two postcodes that look alike on paper but have very different roads.
+there is no history at all, which is where it helps most, along with serious collisions. The
+notebook reports which signals mattered most, and ends with two postcodes that look alike on
+paper but have very different roads.
 
 Claims are private, so the notebook downloads police-reported road collisions and postcode
 locations, both open UK data, and uses collisions in place of claims. Your own claims table
@@ -32,9 +33,10 @@ replaces them in one step.
 ## Before you use it
 
 Collisions are not claims, although they are the event behind most motor claims. The
-notebook reads one week of the road sample, and treats it as a fixed picture of the roads rather
-than a monthly one. The sample holds two months, so you can widen the window. Postcode outlines are not open data, so each postcode is approximated
-from the postcode locations inside it.
+notebook reads one week of the road sample and treats it as a fixed picture of the roads. The
+sample holds two months, and reading all of it gives the same result, so a week is the cheaper
+default. Postcode outlines are not open data, so each postcode is drawn from the postcode
+locations inside it.
 
 ## What you need
 
