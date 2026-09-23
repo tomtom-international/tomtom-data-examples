@@ -139,9 +139,10 @@ def basemap(lat, lon, zoom):
 
 # The catalog default is what Marketplace suggests when you install this listing, so accepting
 # the suggested name means this notebook runs unedited. The dataset covers four metropolitan
-# areas and `hourly_stats` holds 922 million rows for the week, so the notebook reads one
-# region and, by default, one midweek day. Set the dates to 2025-09-01 and 2025-09-07 for the
-# full week; weekday and weekend then separate cleanly in section 6.
+# areas and `hourly_stats` holds 8.1 billion rows over two months, 1 September to 31 October
+# 2025, so the notebook reads one region and, by default, one midweek day. Set the dates to
+# 2025-09-01 and 2025-09-07 for a full week; weekday and weekend then separate cleanly in
+# section 6.
 dbutils.widgets.text("catalog", "TomTom_Traffic_Stats", "Catalog you attached the dataset as")
 dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
 dbutils.widgets.text("date_from", "2025-09-03", "First observation date")

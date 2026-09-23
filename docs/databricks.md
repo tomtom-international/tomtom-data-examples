@@ -31,13 +31,12 @@ Each dataset arrives as one catalog containing one schema:
 Each listing carries its notebooks under **Sample notebook**. Click **Preview notebook**, then
 **Import notebook**, and it lands in your workspace ready to run.
 
-| Notebook | Attached to | Datasets it needs |
+| Notebook | Attached to | Dataset it needs |
 |---|---|---|
-| `traffic_stats_databricks` | TomTom Traffic Stats | Traffic Stats |
-| `traffic_volumes_databricks` | TomTom Traffic Volumes | Traffic Volumes |
-| `territory_risk_assessment_databricks` | both listings | both |
+| Traffic Stats getting and exploratory notebook | TomTom Traffic Stats | Traffic Stats |
+| Traffic Volumes getting and exploratory notebook | TomTom Traffic Volumes | Traffic Volumes |
 
-The same notebooks are the `.py` files in this repository, one folder per subject. You can connect your github account to databricks and checkout the latest version of this repo to get all the notebooks inside your workspace.
+The getting started notebooks come already in the listing ready to import. Apart from these notebooks, you can add tailored notebooks for specific use cases directly from this repository. You can connect your GitHub account to Databricks and check out the latest version of this repo to get the notebooks inside your workspace.
 
 ## 3. Run
 
@@ -53,9 +52,6 @@ works without changing anything.
 is not attached yet, or the catalog was given a different name at install. Set the catalog widget
 to the name in Catalog Explorer.
 
-**A use-case notebook needs both datasets.** `use-cases/territory-risk-assessment` joins Traffic
-Stats to Traffic Volumes and needs both attached. They cover the same four metropolitan areas,
-and the notebook picks one with a widget.
 
 **Empty results for a date or region.** The samples are extracts. The getting started notebooks
 print the dates and regions actually present, run those first.
