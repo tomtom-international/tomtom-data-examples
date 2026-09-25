@@ -5,18 +5,15 @@
 # MAGIC Road data as features for a territory risk model.
 # MAGIC
 # MAGIC A motor insurer rates territory because that is how the evidence arrives. Claims come with
-# MAGIC a postcode, so the model has to predict for a postcode. Everything the model knows about a
-# MAGIC place has to be attached to that postcode too.
+# MAGIC a postcode, so the model has to predict for a postcode. The weak spot is a postcode with no
+# MAGIC claims yet: a new market, a new development, a thin book. There the model knows how big
+# MAGIC the place is and nothing else.
 # MAGIC
-# MAGIC The awkward part is that a postcode is not one kind of road. It can hold a motorway and a
-# MAGIC cul-de-sac. Averaging across them describes neither, and the rating ends up covering roads
-# MAGIC that behave nothing alike. Most insurers know this and have nothing finer to put in its
-# MAGIC place.
-# MAGIC
-# MAGIC TomTom measures roads one at a time. How much traffic each one carries, how fast that
-# MAGIC traffic moves, how steady it is. This notebook turns those measurements into a few numbers
-# MAGIC per postcode, puts them into a claims model, and then asks the two questions that decide
-# MAGIC whether they are worth buying: how much did they add, and which of them did the work.
+# MAGIC TomTom measures the roads themselves, one at a time: how much traffic each one carries,
+# MAGIC and how that traffic drives, hour by hour. This notebook turns those measurements into a
+# MAGIC few numbers per postcode, puts them into a claims model, and asks the questions that
+# MAGIC decide whether they are worth buying. How far do they get a postcode with no history? What
+# MAGIC do they add to a model that has one? And which of them did the work?
 # MAGIC
 # MAGIC ```
 # MAGIC roads -> map cells -> postcodes -> model -> explanation
@@ -36,7 +33,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install xgboost shap h3==4.5.0 pyproj folium==0.20.0 scipy shapely==2.1.2
+# MAGIC %pip install xgboost==3.4.1 shap==0.52.0 h3==4.5.0 pyproj==3.8.0 folium==0.20.0 scipy==1.13.1 shapely==2.1.2
 
 # COMMAND ----------
 
@@ -66,7 +63,7 @@ from scipy.stats import spearmanr
 with contextlib.redirect_stderr(io.StringIO()):
     import shap
     import xgboost as xgb
-    from sklearn.metrics import mean_poisson_deviance
+    from sklearn.metrics import auc, mean_poisson_deviance
     from sklearn.model_selection import GroupKFold
 
 sns.set_theme(style="whitegrid", palette="colorblind")
@@ -162,6 +159,7 @@ spark.sql(f"""
 
 # One row per road, from its observed hours. An hour measured from a single vehicle carries no
 # speed distribution: it still counts towards the average, and its share becomes a feature.
+# Speed spread is how far apart the vehicles on the road drove in the same hour.
 spark.sql(f"""
     CREATE OR REPLACE TEMPORARY VIEW road_signals AS
     WITH hours AS (
@@ -181,7 +179,7 @@ spark.sql(f"""
            avg(CASE WHEN dayofweek(local_time) BETWEEN 2 AND 6
                      AND hour(local_time) IN (7, 8, 9, 16, 17, 18) THEN speed END)
                                                           AS peak_speed_kph,
-           avg(stddev / speed)                            AS speed_variability,
+           avg(stddev / speed)                            AS speed_spread,
            100 * avg(int(speed < 0.6 * speed_limit_kph))  AS congested_hours_pct,
            100 * avg(int(p85 > speed_limit_kph))          AS speeding_hours_pct,
            100 * avg(int(p85 IS NULL))                    AS single_observation_pct
@@ -189,7 +187,7 @@ spark.sql(f"""
     GROUP BY dseg_id
     """)
 
-SPEED_SIGNALS = ["mean_speed_kph", "peak_speed_kph", "speed_variability",
+SPEED_SIGNALS = ["mean_speed_kph", "peak_speed_kph", "speed_spread",
                  "congested_hours_pct", "speeding_hours_pct", "single_observation_pct"]
 weighted = ", ".join(
     f"sum(CASE WHEN {column} IS NOT NULL THEN length_m * {column} END) "
@@ -305,12 +303,15 @@ TOMTOM_FEATURES = {
     "network_coverage_pct": "How much of the road network has a traffic estimate",
     "mean_speed_kph": "How fast the traffic moves",
     "peak_speed_kph": "How fast it moves in the weekday peaks",
-    "speed_variability": "How much the speed swings from hour to hour",
+    "speed_spread": "How far apart vehicles' speeds are on the same road in the same hour",
     "congested_hours_pct": "How often the traffic is jammed",
     "speeding_hours_pct": "How often it runs above the limit",
     "single_observation_pct": "How thin the measurement is",
     "weekend_traffic_ratio": "How much busier or quieter the weekend is",
 }
+# The four that come from Traffic Volumes alone; the other six need Traffic Stats.
+VOLUME_FEATURES = ["vehicle_km_per_day", "major_road_share", "network_coverage_pct",
+                   "weekend_traffic_ratio"]
 
 
 def traffic_weighted(frame, column, weight):
@@ -418,13 +419,14 @@ print(f"{len(panel):,} {postcode_level}-months, {panel.collisions.sum():,.0f} co
 # MAGIC ## 3. What the traffic data is worth
 # MAGIC
 # MAGIC The honest way to price a data feed is to build the model without it and then with it. So
-# MAGIC the same gradient boosted Poisson model is fitted four times, on the same rows, with the
+# MAGIC the same gradient boosted Poisson model is fitted five times, on the same rows, with the
 # MAGIC same settings. Only the features change.
 # MAGIC
 # MAGIC | Model | Features | Stands for |
 # MAGIC |---|---|---|
 # MAGIC | size | month, addresses in the postcode | a territory with no claims yet |
-# MAGIC | size + TomTom | plus the ten road features | that territory with road data |
+# MAGIC | size + volume | plus the four Traffic Volumes features | that territory with traffic counts |
+# MAGIC | size + TomTom | plus all ten road features, volume and speed | that territory with both datasets |
 # MAGIC | size + history | plus last year's collisions | the model an insurer already has |
 # MAGIC | size + history + TomTom | everything | that model with road data added |
 # MAGIC
@@ -437,6 +439,7 @@ print(f"{len(panel):,} {postcode_level}-months, {panel.collisions.sum():,.0f} co
 
 FEATURE_SETS = {
     "size": ["month", "addresses"],
+    "size + volume": ["month", "addresses", *VOLUME_FEATURES],
     "size + TomTom": ["month", "addresses", *TOMTOM_FEATURES],
     "size + history": ["month", "addresses", "prior"],
     "size + history + TomTom": ["month", "addresses", "prior", *TOMTOM_FEATURES],
@@ -463,12 +466,12 @@ def score(y, prediction, average):
         y, np.full(len(y), average))
     ranked = np.asarray(y)[np.argsort(-prediction, kind="stable")]
     share = np.arange(1, len(ranked) + 1) / len(ranked)
-    gini = 2 * (np.trapz(np.cumsum(ranked) / ranked.sum(), share) - 0.5)
+    gini = 2 * (auc(share, np.cumsum(ranked) / ranked.sum()) - 0.5)
     return {"deviance_explained_pct": 100 * explained, "gini": gini}
 
 
 def run(target, train, test):
-    """Fit the four models on `train` and score them on `test`."""
+    """Fit every model in FEATURE_SETS on `train` and score it on `test`."""
     models, predictions, scores = {}, {}, {}
     for name in FEATURE_SETS:
         columns = columns_for(name, target)
@@ -494,7 +497,7 @@ print(f"Ceiling: {ceiling['deviance_explained_pct']:.0f}% of deviance explained"
 # COMMAND ----------
 
 fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5.5), gridspec_kw={"width_ratios": [1, 1.15]})
-colors = ["#bbbbbb", "#e15759", "#4e79a7", "#a0132f"]
+colors = ["#bbbbbb", "#f1a7a6", "#e15759", "#4e79a7", "#a0132f"]
 position = np.arange(len(FEATURE_SETS))
 
 ax1.barh(position - 0.2, frequency.deviance_explained_pct, 0.38, color=colors, label="all collisions")
@@ -544,23 +547,28 @@ display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC Read the results the way an insurer would, starting from the model you already have.
+# MAGIC Read the results the way an insurer would.
+# MAGIC
+# MAGIC **Without a history, road data does most of the work.** It takes the model from about 10%
+# MAGIC to about 28% of the deviance explained, nearly as far as a full year of claims gets it
+# MAGIC (30%). That is the position of a new market, a new postcode or a thin book, where history
+# MAGIC is exactly what is missing. On held-out blocks, where no neighbour was seen in training,
+# MAGIC it is about 25% against 30%.
+# MAGIC
+# MAGIC **Both datasets earn their place.** Traffic volume alone gets to about 24%: how much driving
+# MAGIC there is, and how much of it is on major roads. How the traffic drives, which comes from
+# MAGIC Traffic Stats, adds about four more points, and five on held-out territory.
+# MAGIC
+# MAGIC **For serious collisions, road data beats the history.** Severity follows speed, which the
+# MAGIC road data measures and last year's count does not.
 # MAGIC
 # MAGIC **With a claims history, road data adds a little.** About two points on held-out months
 # MAGIC and one on held-out territory. That is small, and it should be. Most of the change in a
 # MAGIC postcode's count from one month to the next is chance, and the ceiling above shows how
 # MAGIC little room there is. A model that already knows each postcode's history is close to it.
 # MAGIC
-# MAGIC **Without a history, road data does most of the work.** It takes the model from about 10%
-# MAGIC to about 28%, nearly as far as a full year of claims gets it. That is the position of a new
-# MAGIC territory, a new postcode or a thin book, where history is exactly what is missing.
-# MAGIC
-# MAGIC **For serious collisions, road data beats the history.** Severity follows speed, which the
-# MAGIC road data measures and last year's count does not.
-# MAGIC
-# MAGIC The held-out blocks rank the four models the same way, so the gain is not the model
-# MAGIC memorising places. Your numbers will move a little with the library versions; the order
-# MAGIC should not.
+# MAGIC The held-out blocks rank the models the same way, so the gain is not the model memorising
+# MAGIC places.
 
 # COMMAND ----------
 
@@ -569,7 +577,8 @@ display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
 # MAGIC
 # MAGIC A number on a slide is not enough to put a feature into a rating. Someone will ask which
 # MAGIC features moved the price, in which direction, and whether the answer is the same in every
-# MAGIC region. SHAP answers all three from the fitted model.
+# MAGIC region. SHAP answers all three from the fitted model. It explains the no-history model
+# MAGIC here, the one the headline is about, so every feature in it is size, month or road.
 # MAGIC
 # MAGIC Each dot below is one postcode-month, placed by how much a feature pushed its prediction
 # MAGIC and coloured by the value of that feature. The model works on a log scale, so a push of
@@ -577,12 +586,11 @@ display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
 
 # COMMAND ----------
 
-FULL = columns_for("size + history + TomTom", "collisions")
-full_model = models["size + history + TomTom"]
-held_out = test[FULL].reset_index(drop=True)
-explanation = shap.TreeExplainer(full_model)(held_out)
+EXPLAINED = columns_for("size + TomTom", "collisions")
+held_out = test[EXPLAINED].reset_index(drop=True)
+explanation = shap.TreeExplainer(models["size + TomTom"])(held_out)
 
-shap.plots.beeswarm(explanation, max_display=13, show=False)
+shap.plots.beeswarm(explanation, max_display=12, show=False)
 plt.gcf().set_size_inches(12, 6)
 plt.title("How each feature moves the prediction", fontsize=13, fontweight="bold")
 plt.tight_layout()
@@ -591,16 +599,22 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC Traffic comes first, as it should: more driving, more collisions. Second is speed spread,
+# MAGIC ahead of the size of the postcode. Where vehicles on the same road drive at very different
+# MAGIC speeds, the model expects more collisions, which is what road safety research has long
+# MAGIC found. Higher speeds push the prediction down, because the fastest roads are motorways,
+# MAGIC built for it.
+# MAGIC
 # MAGIC The same values answer a more practical question: which postcodes does this change, and by
-# MAGIC how much. Below are the two the existing model cannot tell apart, one pushed up by the road
-# MAGIC data and one pushed down. The bars are how unusual each of their road features is, and the
-# MAGIC waterfall builds the raised prediction one term at a time.
+# MAGIC how much. Below are two of the same size, which the size-only model cannot tell apart. The
+# MAGIC road data pushes one up and the other down. The bars are how unusual each of their road
+# MAGIC features is, and the waterfall builds the raised prediction one term at a time.
 
 # COMMAND ----------
 
 october = np.flatnonzero((test.month == TEST_MONTHS[0]).values)
-road_effect = explanation.values[:, [FULL.index(column) for column in TOMTOM_FEATURES]].sum(axis=1)
-existing = predictions["size + history"]
+road_effect = explanation.values[:, [EXPLAINED.index(column) for column in TOMTOM_FEATURES]].sum(axis=1)
+existing = predictions["size"]
 
 middle = np.quantile(existing[october], [0.4, 0.6])
 alike = october[(existing[october] >= middle[0]) & (existing[october] <= middle[1])]
@@ -612,7 +626,7 @@ standardised = ((pair[list(TOMTOM_FEATURES)] - held_out[list(TOMTOM_FEATURES)].m
 axis = standardised.T.plot.barh(figsize=(12, 5.5), color=["#a0132f", "#4e79a7"], width=0.8)
 axis.axvline(0, color="black", linewidth=0.8)
 axis.set(xlabel="Standard deviations from the average postcode", ylabel="",
-         title="Same rating today, different roads")
+         title="Same size, different roads")
 axis.legend(title=postcode_level, loc="upper right")
 plt.tight_layout()
 plt.show()
@@ -636,7 +650,7 @@ plt.show()
 
 shown = test.iloc[october][["postcode", "collisions"]].copy()
 shown["effect"] = road_effect[october]
-shown["prediction"] = predictions["size + history + TomTom"][october].round(2)
+shown["prediction"] = predictions["size + TomTom"][october].round(2)
 shown["multiplier"] = np.exp(shown.effect).round(2)
 shown = shown[shown.postcode.isin(outlines.index)]
 
@@ -705,6 +719,11 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC Two things did not help, and are left out. Weighting each hour by the traffic it carries,
+# MAGIC and counting the vehicle-km driven over the limit or in jams as features of their own. The
+# MAGIC model already sees the traffic, so neither changed the scores. Both are still worth a map,
+# MAGIC which the `territory-risk-assessment` notebook draws.
+# MAGIC
 # MAGIC Three ways to take this further. Feed the model your own claims, with policies in force
 # MAGIC as the exposure. Build the features by month once the claims are monthly too, which is
 # MAGIC where more than a week of traffic starts to pay. And keep the map cells from section 1,
