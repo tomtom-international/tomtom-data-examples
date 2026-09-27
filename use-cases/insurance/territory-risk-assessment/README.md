@@ -45,4 +45,5 @@ not quiet. The terms are defined in the [insurance README](../README.md#terms).
 ## What you need
 
 The TomTom Traffic Stats and Traffic Volumes samples. With the defaults, a run takes about
-four and a half minutes on serverless compute.
+four and a half minutes on serverless compute. As a serverless job it uses about 4 DBU, which
+is about $2 at list price. On classic compute, the H3 functions in its SQL need Photon.

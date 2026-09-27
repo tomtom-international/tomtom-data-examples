@@ -41,6 +41,8 @@ The getting started notebooks come already in the listing ready to import. Apart
 ## 3. Run
 
 Attach the notebook to serverless compute, or to a cluster on Databricks Runtime 16.2 or later.
+On a cluster, turn on Photon: the H3 functions that some notebooks use in SQL need it on
+classic compute.
 
 Each notebook opens with widgets for the catalog names and, where relevant, a date and a region.
 The defaults match the suggested catalog names and a date present in the sample, so **Run all**
