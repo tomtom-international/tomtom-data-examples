@@ -164,15 +164,25 @@ spark.sql(f"""
     GROUP BY 1, 2
     """)
 
+# Each map cell's hexagon comes from the h3 library, so the SQL needs no H3 functions, which
+# classic compute only has with Photon.
+cells = collect(f"""
+    SELECT DISTINCT h3_r9 FROM {volumes}.aadt_segments
+    WHERE region = '{region}' AND vintage_year = {vintage_year} AND h3_r9 IS NOT NULL
+    """)
+cells["hexagon"] = [h3.cell_to_parent(cell, HEXAGON_RESOLUTION) for cell in cells.h3_r9]
+spark.createDataFrame(cells).createOrReplaceTempView("cell_hexagon")
+
 # One row per hexagon and hour of the week. Everything in sections 3 and 4 comes from it.
 week = collect(f"""
-    SELECT h3_toparent(w.h3_r9, {HEXAGON_RESOLUTION}) AS hexagon, w.slot,
+    SELECT x.hexagon, w.slot,
            sum(w.vehicle_km)                                             AS vehicle_km,
            sum(CASE WHEN c.over_limit IS NOT NULL THEN w.vehicle_km END) AS measured_km,
            sum(w.vehicle_km * c.over_limit)                              AS over_limit_km,
            sum(w.vehicle_km * c.wide_spread)                             AS wide_spread_km,
            sum(w.vehicle_km * c.jammed)                                  AS jammed_km
     FROM cell_week w
+    LEFT JOIN cell_hexagon x ON x.h3_r9 = w.h3_r9
     LEFT JOIN cell_conditions c ON c.h3_r9 = w.h3_r9 AND c.slot = w.slot
     GROUP BY 1, 2
     """).fillna(0)
