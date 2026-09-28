@@ -277,7 +277,8 @@ units[["lat", "lon"]] = postcodes.groupby(postcode_level)[["lat", "lon"]].mean()
 
 # Nearest address is a Voronoi rule, so drawing it gives the boundary. One tile per address
 # point, merged by postcode, then held to the same reach the assignment uses so that coastal
-# postcodes stop at the coast. Thinned to 150 m, which is far below anything the map shows.
+# postcodes stop at the coast. Thinned to 150 m as one coverage, so two neighbours keep the
+# same shared border; thinning each outline on its own made neighbours overlap.
 corners = postcodes.drop_duplicates(["easting", "northing"])
 grid = corners[["easting", "northing"]].values
 tiles = shapely.voronoi_polygons(
@@ -292,7 +293,7 @@ spread = (corners.groupby(postcode_level)[["easting", "northing"]]
 reach = shapely.buffer(shapely.envelope(spread.loc[outlines.index].values),
                        MAX_ASSIGNMENT_M, join_style="mitre")
 outlines[:] = shapely.transform(
-    shapely.simplify(shapely.intersection(outlines.values, reach), 150),
+    shapely.intersection(shapely.coverage_simplify(outlines.values, 150), reach),
     lambda xy: np.column_stack(TO_WGS84.transform(xy[:, 0], xy[:, 1])))
 
 # COMMAND ----------
