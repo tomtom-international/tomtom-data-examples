@@ -1,12 +1,12 @@
 # Use cases
 
-A worked example that answers one question end to end. One folder each.
+Each use case answers one practical question end to end, with one notebook per platform.
+Use cases are grouped by industry.
 
-| Folder | Question | Data needed |
-|---|---|---|
-| `territory-risk-assessment/` | Which areas and routes carry the most road risk? | Traffic Stats and Traffic Volumes |
+| Industry | What it covers |
+|---|---|
+| [`insurance/`](insurance/) | Where and when risky driving happens, and what road data adds to a claims model |
 
-Each folder holds a README with the question and the approach, and one notebook per platform.
-
-Unlike the getting started notebooks, a use case may need more than one data product and may take
-longer to run. Each README says which products it expects.
+Every folder holds a README with the question and says which TomTom datasets the notebook
+expects. A use case may need more than one dataset, and may take longer to run than a getting
+started notebook.
