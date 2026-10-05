@@ -18,10 +18,10 @@ Each one answers a single question end to end and needs both the Traffic Stats a
 
 Each dataset is published as a free sample on different data marketplaces, and every notebook here expects one to be attached. To get started with step by step instructions for getting access to the data and running notebooks in each platform:
 
-| Dataset | What it measures | TomTom docs | Databricks | Microsoft Fabric |
-|---|---|---|---|---|
-| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks.md) | Soon |
-| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks.md) | Soon |
+| Dataset | What it measures | TomTom docs | Databricks |
+|---|---|---|---|
+| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks.md) |
+| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks.md) |
 
 
 The samples are geographic extracts rather than whole countries, and samples are meant to overlap in regions provided so joined dataset uses cases are possible.
