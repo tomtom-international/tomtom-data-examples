@@ -5,6 +5,14 @@ This repo holds ready to run notebooks for TomTom data published as free samples
 - **[`getting-started/`](getting-started/)**: one notebook per dataset and per marketplace to get you started in minutes.
 - **[`use-cases/`](use-cases/)**: tailored notebook examples that answer practical real world scenarios end to end.
 
+## Use cases
+
+Each one answers a single question end to end and needs both the Traffic Stats and Traffic Volumes samples.
+
+**Insurance**
+
+- **[Territory risk assessment](use-cases/insurance/territory-risk-assessment/)**: where and when the risky kilometres are driven: above the speed limit, with a wide spread of speeds, or in a jam. It also shows how one driver's speed compares with the traffic on the same road. No claims data needed.
+- **[Territory risk modeling](use-cases/insurance/territory-risk-modeling/)**: how far road data gets a pricing model for postcodes with no claims history, and which road features help.
 
 ## Getting started
 
@@ -12,8 +20,8 @@ Each dataset is published as a free sample on different data marketplaces, and e
 
 | Dataset | What it measures | TomTom docs | Databricks | Microsoft Fabric |
 |---|---|---|---|---|
-| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks) | Soon |
-| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks) | Soon |
+| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks.md) | Soon |
+| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks.md) | Soon |
 
 
 The samples are geographic extracts rather than whole countries, and samples are meant to overlap in regions provided so joined dataset uses cases are possible.
