@@ -177,8 +177,8 @@ if spark.table("segments").isEmpty():
 # MAGIC                        │
 # MAGIC                        ├── frc               road class 0–7, one per segment
 # MAGIC                        ├── aadt              1 value    average day
-# MAGIC                        ├── aadt_by_day       7 values   Mon → Sun
-# MAGIC                        ├── aadt_by_day_hour  168 values Mon 00:00 → Sun 23:00
+# MAGIC                        ├── aadt_by_day       7 values   Mon (0) → Sun (6)
+# MAGIC                        ├── aadt_by_day_hour  168 values Mon 00:00 (0) → Sun 23:00 (167)
 # MAGIC                        └── h3_r9, osm_id ... where it sits, and how to join it
 # MAGIC ```
 # MAGIC
