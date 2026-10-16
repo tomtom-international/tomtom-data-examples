@@ -51,7 +51,7 @@ replaces them in one step.
 Collisions are not claims, although they are the event behind most motor claims. The road
 data is treated as a fixed picture of the roads. Postcode outlines are not open data, so each
 postcode is drawn from the postcode locations inside it. The terms are defined in the
-[insurance README](../README.md#terms).
+[insurance README](https://github.com/tomtom-international/tomtom-data-examples/blob/main/use-cases/insurance/README.md#terms).
 
 ## What you need
 

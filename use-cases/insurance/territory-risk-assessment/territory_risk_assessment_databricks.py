@@ -24,7 +24,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install folium==0.20.0 h3==4.5.0 shapely==2.1.2
+# MAGIC %pip install folium==0.20.0 h3==4.5.0 shapely==2.1.2 seaborn==0.13.2
 
 # COMMAND ----------
 

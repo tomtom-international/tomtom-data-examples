@@ -40,7 +40,8 @@ faster than 95% of the traffic on the other.
 The conditions describe roads, not drivers. They rank places within one sample, so compare
 regions with care. A jam is traffic below 60% of the limit, which in towns includes
 stop-start traffic at junctions. Roads with no traffic estimate are missing from the data,
-not quiet. The terms are defined in the [insurance README](../README.md#terms).
+not quiet. The terms are defined in the
+[insurance README](https://github.com/tomtom-international/tomtom-data-examples/blob/main/use-cases/insurance/README.md#terms).
 
 ## What you need
 

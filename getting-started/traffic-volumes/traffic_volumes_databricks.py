@@ -64,13 +64,17 @@
 # MAGIC    hour` uses Monday as day 0. This notebook uses `posexplode`, which counts from 0.
 # MAGIC 3. **Regions are metropolitan extracts far wider than the city.** `london` runs from the
 # MAGIC    Dorset coast to the Peak District and includes Birmingham, Bristol and Southampton;
-# MAGIC    `melbourne` covers most of Victoria. Section 1 prints each extent.
+# MAGIC    `melbourne` covers most of Victoria. Section 2 prints each extent.
 # MAGIC 4. **Exposure is `aadt` times `length_m`.** Vehicle-kilometres do not change when a road
 # MAGIC    is drawn as one segment or ten, so sum that rather than `aadt` when comparing areas.
 
 # COMMAND ----------
 
-# MAGIC %pip install folium==0.20.0 shapely==2.1.2 h3==4.5.0
+# MAGIC %pip install folium==0.20.0 shapely==2.1.2 h3==4.5.0 seaborn==0.13.2
+
+# COMMAND ----------
+
+dbutils.library.restartPython()
 
 # COMMAND ----------
 
@@ -145,7 +149,7 @@ except Exception as error:
         f"the listing. Run SHOW CATALOGS if you are not sure what it was called."
     ) from None
 
-# Everything after section 1 reads one region and one vintage through this view.
+# Everything after section 2 reads one region and one vintage through this view.
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW segments AS
     SELECT * FROM {aadt} WHERE region = '{region}' AND vintage_year = {vintage_year}
@@ -160,7 +164,32 @@ if spark.table("segments").isEmpty():
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 1. What is in the database
+# MAGIC ## 1. How the data is organised
+# MAGIC
+# MAGIC ```
+# MAGIC region ── vintage_year
+# MAGIC               │
+# MAGIC               ├── coverage        1 row per ROAD CLASS   (km covered vs km in network)
+# MAGIC               │        ▲
+# MAGIC               │        │ join on region, vintage_year, frc
+# MAGIC               │        │
+# MAGIC               └── aadt_segments   1 row per SEGMENT
+# MAGIC                        │
+# MAGIC                        ├── frc               road class 0–7 (no 5), one per segment
+# MAGIC                        ├── aadt              1 value    average day
+# MAGIC                        ├── aadt_by_day       7 values   Mon (0) → Sun (6)
+# MAGIC                        ├── aadt_by_day_hour  168 values Mon 00:00 (0) → Sun 23:00 (167)
+# MAGIC                        └── h3_r9, osm_id ... where it sits, and how to join it
+# MAGIC ```
+# MAGIC
+# MAGIC **A segment is the row.** Road class (`frc`) is a label on each segment, not a level above it:
+# MAGIC "motorways" means the segments with `frc = 0`. A road such as the M25 is many segments, so
+# MAGIC aggregate them, weighted by `length_m`.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 2. What is in the database
 # MAGIC
 # MAGIC Every region and vintage in the share, with its extent. The rest of the notebook reads
 # MAGIC the one picked by the widgets above.
@@ -182,7 +211,55 @@ display(spark.sql(f"""
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Check coverage first
+# MAGIC ## 3. A first look at the roads
+# MAGIC
+# MAGIC Before any statistics, look at the data. The map below shows the busiest segments
+# MAGIC around the centre of the region. Click a segment to see its AADT and its Monday-to-Sunday
+# MAGIC breakdown, and ask whether the busy roads are the ones you would expect to be busy. That
+# MAGIC is the quickest validation of the data there is.
+
+# COMMAND ----------
+
+# Centre the view on the busiest 1% of the extract rather than a hardcoded city
+focus = spark.sql("""
+        SELECT percentile_approx((min_lon + max_lon) / 2, 0.5) AS lon,
+               percentile_approx((min_lat + max_lat) / 2, 0.5) AS lat
+        FROM (SELECT * FROM segments ORDER BY aadt DESC LIMIT 2000)
+        """).first()
+
+CBD = (focus.lon - 0.02, focus.lat - 0.012, focus.lon + 0.02, focus.lat + 0.012)
+
+cbd = collect(f"""
+        SELECT segment_id, frc, aadt, osm_id, aadt_by_day, geometry_wkt FROM segments
+        WHERE {overlaps(CBD)}
+        ORDER BY aadt DESC LIMIT 1500
+        """)
+
+chart = basemap(focus.lat, focus.lon, 15)
+scale = LinearColormap(HEAT, vmin=cbd.aadt.quantile(0.05), vmax=cbd.aadt.quantile(0.95),
+                       caption="AADT (annual average daily traffic)")
+
+for row in cbd.itertuples():
+    daily = "<br>".join(f"{day[:3]}: {value:,.0f}" for day, value in zip(DAYS, row.aadt_by_day))
+    folium.PolyLine(
+        [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
+        weight=3 + min(row.aadt / 5000, 5), color=scale(row.aadt), opacity=0.8,
+        popup=folium.Popup(
+            f"<b>Segment:</b> {row.segment_id}<br>"
+            f"<b>FRC:</b> {row.frc} ({FRC_LABELS.get(row.frc, '')})<br>"
+            f"<b>OSM:</b> {row.osm_id}<br>"
+            f"<b>AADT:</b> {row.aadt:,.0f}<hr><b>Daily averages:</b><br>{daily}",
+            max_width=260,
+        ),
+    ).add_to(chart)
+
+scale.add_to(chart)
+display(chart)
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4. Check coverage first
 # MAGIC
 # MAGIC Coverage follows probe vehicles: it is high on motorways and low on residential streets.
 # MAGIC Read it before anything else, because `aadt_segments` holds only the covered part of the
@@ -232,7 +309,7 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Volume by road class
+# MAGIC ## 5. Volume by road class
 # MAGIC
 # MAGIC Traffic is unevenly distributed. Most segments are small roads, and most of the traffic
 # MAGIC is on the few big ones, so a mean across all segments describes a quiet street rather
@@ -274,7 +351,7 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4. Temporal traffic patterns
+# MAGIC ## 6. Temporal traffic patterns
 # MAGIC
 # MAGIC Every segment carries **168 hourly values**, 7 days by 24 hours. That temporal depth is
 # MAGIC what separates this dataset from a single annual number: it says *when* the traffic is
@@ -332,23 +409,16 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5. Traffic intensity on a map
+# MAGIC ## 7. Traffic intensity on a map
 # MAGIC
 # MAGIC Traffic is spatial, and a map shows what a table cannot: the corridors, the density
 # MAGIC gradient out of the centre, and how road class and volume line up.
 # MAGIC
 # MAGIC Filter on the bounding box columns before parsing any geometry, so only the segments
-# MAGIC about to be drawn get read. The box below is centred on the busiest part of the region;
-# MAGIC set `AREA` by hand for somewhere else.
+# MAGIC about to be drawn get read. The box below is centred on the same busy point as section 3,
+# MAGIC zoomed out; set `AREA` by hand for somewhere else.
 
 # COMMAND ----------
-
-# Centre the view on the busiest 1% of the extract rather than a hardcoded city
-focus = spark.sql("""
-        SELECT percentile_approx((min_lon + max_lon) / 2, 0.5) AS lon,
-               percentile_approx((min_lat + max_lat) / 2, 0.5) AS lat
-        FROM (SELECT * FROM segments ORDER BY aadt DESC LIMIT 2000)
-        """).first()
 
 AREA = (focus.lon - 0.12, focus.lat - 0.06, focus.lon + 0.12, focus.lat + 0.06)
 
@@ -375,48 +445,7 @@ plt.show()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6. The same roads, interactively
-# MAGIC
-# MAGIC A static picture shows the pattern; an interactive one lets you check it. Click a segment
-# MAGIC to see its AADT and its Monday-to-Sunday breakdown, and ask whether the busy roads are
-# MAGIC the ones you would expect to be busy. That is the quickest validation of the data there
-# MAGIC is.
-
-# COMMAND ----------
-
-CBD = (focus.lon - 0.02, focus.lat - 0.012, focus.lon + 0.02, focus.lat + 0.012)
-
-cbd = collect(f"""
-        SELECT segment_id, frc, aadt, osm_id, aadt_by_day, geometry_wkt FROM segments
-        WHERE {overlaps(CBD)}
-        ORDER BY aadt DESC LIMIT 1500
-        """)
-
-chart = basemap(focus.lat, focus.lon, 15)
-scale = LinearColormap(HEAT, vmin=cbd.aadt.quantile(0.05), vmax=cbd.aadt.quantile(0.95),
-                       caption="AADT (annual average daily traffic)")
-
-for row in cbd.itertuples():
-    daily = "<br>".join(f"{day[:3]}: {value:,.0f}" for day, value in zip(DAYS, row.aadt_by_day))
-    folium.PolyLine(
-        [(lat, lon) for lon, lat in wkt.loads(row.geometry_wkt).coords],
-        weight=3 + min(row.aadt / 5000, 5), color=scale(row.aadt), opacity=0.8,
-        popup=folium.Popup(
-            f"<b>Segment:</b> {row.segment_id}<br>"
-            f"<b>FRC:</b> {row.frc} ({FRC_LABELS.get(row.frc, '')})<br>"
-            f"<b>OSM:</b> {row.osm_id}<br>"
-            f"<b>AADT:</b> {row.aadt:,.0f}<hr><b>Daily averages:</b><br>{daily}",
-            max_width=260,
-        ),
-    ).add_to(chart)
-
-scale.add_to(chart)
-display(chart)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## 7. Exposure per H3 cell
+# MAGIC ## 8. Exposure per H3 cell
 # MAGIC
 # MAGIC Joining addresses or journeys to road segments is awkward: segment boundaries are
 # MAGIC arbitrary and a spatial join costs a lookup per point. `h3_r9` holds the

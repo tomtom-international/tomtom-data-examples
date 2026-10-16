@@ -33,7 +33,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install xgboost==3.4.1 shap==0.52.0 h3==4.5.0 pyproj==3.8.0 folium==0.20.0 scipy==1.13.1 shapely==2.1.2
+# MAGIC %pip install xgboost==3.4.1 shap==0.52.0 h3==4.5.0 pyproj==3.8.0 folium==0.20.0 scipy==1.13.1 shapely==2.1.2 seaborn==0.13.2
 
 # COMMAND ----------
 
