@@ -8,9 +8,9 @@ this repository, the compute to run them on, and what to check when a notebook f
 
 You need a Databricks workspace with Unity Catalog. Free accounts work.
 
-In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats** or
-**TomTom Traffic Volumes**, and click **Get instant access** on the listing. The use cases need
-both.
+In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats**,
+**TomTom Traffic Volumes** or **TomTom Orbis Maps**, and click **Get instant access** on the
+listing. The use cases need both traffic listings.
 
 **Keep the suggested catalog name** when you install. Every notebook here defaults to it, so
 none of them needs editing. Unity Catalog ignores case in names.
@@ -19,6 +19,7 @@ none of them needs editing. Unity Catalog ignores case in names.
 |---|---|---|---|
 | Traffic Stats | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
 | Traffic Volumes | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
+| Orbis Maps | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
 
 ## 2. Get the notebooks
 
