@@ -1,0 +1,24 @@
+name: Commisery
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  commisery:
+    name: Validate PR
+    runs-on: ubuntu-latest
+    steps:
+      - uses: tomtom-international/commisery-action@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # PRs are squash-merged, so the PR title becomes the commit message on
+          # main. Validate the title as a Conventional Commit; skip per-commit
+          # checks since feature-branch commits are discarded by the squash.
+          validate-pull-request: true
+          validate-commits: false
+          validate-pull-request-title-bump: false
