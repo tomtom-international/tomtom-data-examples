@@ -22,6 +22,7 @@ Each dataset is published as a free sample on different data marketplaces, and e
 |---|---|---|---|
 | **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks.md) |
 | **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks.md) |
+| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [Overture schema](https://docs.overturemaps.org/schema/reference/transportation/segment/) | [docs](docs/databricks.md) |
 
 
 The samples are geographic extracts rather than whole countries, and samples are meant to overlap in regions provided so joined dataset uses cases are possible.
