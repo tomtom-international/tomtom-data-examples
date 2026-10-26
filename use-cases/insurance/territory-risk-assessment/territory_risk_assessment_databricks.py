@@ -17,10 +17,12 @@
 # MAGIC There are no claims here and no weights. This notebook measures. The
 # MAGIC `territory-risk-modeling` notebook tests the measurements against real collisions.
 # MAGIC
-# MAGIC **What you need.** Both free samples from Databricks Marketplace: TomTom Traffic Stats,
-# MAGIC hourly speeds per road, and TomTom Traffic Volumes, traffic per road for every hour of
-# MAGIC the week. They cover the same four metropolitan areas, and the `region` widget picks one.
-# MAGIC The notebook reads one week, Monday to Sunday.
+# MAGIC **What you need.** Three free samples from Databricks Marketplace: TomTom Traffic Stats,
+# MAGIC hourly speeds per road, TomTom Traffic Volumes, traffic per road for every hour of the
+# MAGIC week, and TomTom Orbis Maps, the road network the maps are drawn on. The traffic samples
+# MAGIC cover the same four metropolitan areas, and the `region` widget picks one. Orbis Maps
+# MAGIC covers three of them; in `melbourne` the maps are drawn without roads. The notebook reads
+# MAGIC one week, Monday to Sunday.
 
 # COMMAND ----------
 
@@ -53,18 +55,59 @@ def collect(query):
     return frame.toPandas().astype(decimals)
 
 
-def basemap():
-    """A muted OpenStreetMap basemap. CartoDB's tiles now need an API key; this does not."""
-    chart = folium.Map(tiles="OpenStreetMap")
+# Road classes for the base map, most important first. A map of the whole region draws the
+# first three; a close-up draws them all.
+ROAD_CLASSES = ["motorway", "trunk", "primary", "secondary", "tertiary", "unclassified",
+                "residential"]
+ROAD_WEIGHTS = dict(zip(ROAD_CLASSES, [2.5, 2, 1.5, 1, 0.8, 0.6, 0.6]))
+MAJOR_ROADS = ROAD_CLASSES[:3]
+
+
+def basemap(bounds, classes, tolerance, on_top=False):
+    """A map drawn on the Orbis road network inside `bounds`, [[south, west], [north, east]].
+
+    The roads come from the Orbis Maps share, so no tile service or API key is involved. Each
+    class is merged into long lines and simplified to `tolerance` degrees, and pieces shorter
+    than that are dropped: they are below a pixel at the zoom the map opens at, and they keep
+    a map of the whole region light enough to display. `on_top` draws the roads over the
+    data, for filled shapes that would hide them; hovers still reach the shapes underneath."""
+    (south, west), (north, east) = bounds
+    roads = collect(f"""
+        SELECT class AS road_class, geometry FROM {maps}.segment
+        WHERE region = '{region}' AND subtype = 'road'
+          AND class IN ({", ".join(f"'{c}'" for c in classes)})
+          AND bbox.xmax >= {west} AND bbox.xmin <= {east}
+          AND bbox.ymax >= {south} AND bbox.ymin <= {north}
+        """)
+    if roads.empty:
+        print(f"Orbis Maps has no roads for region '{region}', so this map is drawn without them.")
+    lines = shapely.from_wkb(roads.geometry.map(bytes).to_numpy())
+
+    chart = folium.Map(tiles=None)
     chart.get_root().header.add_child(folium.Element(
-        "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.92) brightness(1.06);}</style>"
-    ))
+        "<style>.folium-map.leaflet-container{background:#f4f4f2;}</style>"))
+    folium.map.CustomPane("roads", z_index=450 if on_top else 350).add_to(chart)
+    for road_class in reversed(classes):  # minor roads first, so the major ones draw over them
+        merged = shapely.line_merge(
+            shapely.multilinestrings(lines[(roads.road_class == road_class).to_numpy()]))
+        parts = shapely.get_parts(shapely.simplify(merged, tolerance))
+        parts = parts[shapely.length(parts) >= tolerance]
+        if not len(parts):
+            continue
+        line = shapely.set_precision(shapely.multilinestrings(parts), tolerance / 10)
+        folium.GeoJson(
+            json.loads(shapely.to_geojson(line)), pane="roads",
+            style_function=lambda _, weight=ROAD_WEIGHTS[road_class]: {
+                "color": "#555555", "weight": weight, "opacity": 0.6 if on_top else 0.45},
+            attribution="Roads: TomTom Orbis Maps. Contains OpenStreetMap data, ODbL.",
+        ).add_to(chart)
     return chart
 
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
 dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
+dbutils.widgets.text("maps_catalog", "TomTom_Orbis_Maps", "Orbis Maps catalog")
 dbutils.widgets.text("region", "london", "Region: london, austin, losangeles or melbourne")
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 dbutils.widgets.text("first_date", "2025-09-01", "First Traffic Stats date, UTC")
@@ -72,6 +115,7 @@ dbutils.widgets.text("last_date", "2025-09-07", "Last Traffic Stats date, UTC")
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
 volumes = dbutils.widgets.get("volumes_catalog") + ".traffic_volumes"
+maps = dbutils.widgets.get("maps_catalog") + ".orbis_maps"
 region = dbutils.widgets.get("region")
 vintage_year = int(dbutils.widgets.get("vintage_year"))
 place = {"london": "London", "austin": "Austin", "losangeles": "Los Angeles",
@@ -79,13 +123,13 @@ place = {"london": "London", "austin": "Austin", "losangeles": "Los Angeles",
 first_date = dbutils.widgets.get("first_date")
 last_date = dbutils.widgets.get("last_date")
 
-for schema in (stats, volumes):
+for schema in (stats, volumes, maps):
     try:
         spark.sql(f"DESCRIBE SCHEMA {schema}")
     except Exception as error:
         raise ValueError(
             f"Cannot read {schema}. The error was: {error}. Set the catalog widgets at the top "
-            f"of this notebook to the catalogs you accepted when you installed the two "
+            f"of this notebook to the catalogs you accepted when you installed the three "
             f"listings. Run SHOW CATALOGS if you are not sure what they were called."
         ) from None
 
@@ -292,7 +336,8 @@ plt.show()
 # MAGIC limit follows the motorways and the fast roads between towns, which carry far less
 # MAGIC traffic. A rating built on traffic volume alone sees only the first map.
 # MAGIC
-# MAGIC The same hexagons to explore. Hover one to see all three conditions.
+# MAGIC The same hexagons to explore, with the motorways, trunk and primary roads from Orbis Maps
+# MAGIC drawn over them. Hover one to see all three conditions.
 
 # COMMAND ----------
 
@@ -303,7 +348,6 @@ scale = branca.colormap.LinearColormap(
     [mcolors.to_hex(plt.get_cmap("Reds")(x)) for x in np.linspace(0, 1, 9)], vmin=0, vmax=limit,
     caption="Share of measured driving over the limit (%)")
 
-chart = basemap()
 drawn = folium.GeoJson(
     {"type": "FeatureCollection", "features": [
         {"type": "Feature",
@@ -319,7 +363,9 @@ drawn = folium.GeoJson(
         fields=["hexagon", "vehicle_km", "over_limit_pct", "wide_spread_pct", "jammed_pct"],
         aliases=["Hexagon", "Vehicle-km per day", "Over the limit (%)", "Wide speed spread (%)",
                  "In a jam (%)"]),
-).add_to(chart)
+)
+chart = basemap(drawn.get_bounds(), MAJOR_ROADS, tolerance=0.001, on_top=True)
+drawn.add_to(chart)
 scale.add_to(chart)
 chart.fit_bounds(drawn.get_bounds())
 display(chart)
@@ -446,7 +492,6 @@ segments["over_limit_pct"] = (segments.over_limit_pct * 100 / 95).round(1)
 scale = branca.colormap.LinearColormap(
     [mcolors.to_hex(plt.get_cmap("Reds")(x)) for x in np.linspace(0.15, 1, 9)], vmin=0, vmax=100,
     caption="Vehicles over the limit (%)")
-chart = basemap()
 drawn = folium.GeoJson(
     {"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": row.drop("geometry_wkt").to_dict(),
@@ -457,7 +502,11 @@ drawn = folium.GeoJson(
     tooltip=folium.GeoJsonTooltip(
         fields=["street_name", "over_limit_pct", "mean_speed_kph", "speed_limit_kph"],
         aliases=["Road", "Vehicles over the limit (%)", "Mean speed (km/h)", "Limit (km/h)"]),
-).add_to(chart)
+)
+(south, west), (north, east) = drawn.get_bounds()
+chart = basemap([[south - 0.02, west - 0.02], [north + 0.02, east + 0.02]], ROAD_CLASSES,
+                tolerance=0.00005)
+drawn.add_to(chart)
 scale.add_to(chart)
 chart.fit_bounds(drawn.get_bounds())
 display(chart)
