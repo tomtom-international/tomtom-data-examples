@@ -91,19 +91,14 @@ def download(url, name):
     return path
 
 
-# The road classes drawn on the map, and their line widths.
 ROAD_WEIGHTS = {"motorway": 2.5, "trunk": 2, "primary": 1.5}
 MAJOR_ROADS = list(ROAD_WEIGHTS)
 
 
 def basemap(bounds, classes, tolerance, on_top=False):
-    """A map drawn on the Orbis road network inside `bounds`, [[south, west], [north, east]].
-
-    The roads come from the Orbis Maps share, so no tile service or API key is involved. Each
-    class is merged into long lines and simplified to `tolerance` degrees, and pieces shorter
-    than that are dropped: they are below a pixel at the zoom the map opens at, and they keep
-    a map of the whole region light enough to display. `on_top` draws the roads over the
-    data, for filled shapes that would hide them; hovers still reach the shapes underneath."""
+    """A map drawn on the Orbis roads inside `bounds`, [[south, west], [north, east]], with no
+    tile service. Pieces shorter than `tolerance` degrees are dropped to keep the map light.
+    `on_top` draws the roads over filled shapes, which still receive the hovers."""
     (south, west), (north, east) = bounds
     roads = collect(f"""
         SELECT class AS road_class, geometry FROM {maps}.segment
@@ -123,16 +118,19 @@ def basemap(bounds, classes, tolerance, on_top=False):
     for road_class in reversed(classes):  # minor roads first, so the major ones draw over them
         merged = shapely.line_merge(
             shapely.multilinestrings(lines[(roads.road_class == road_class).to_numpy()]))
-        parts = shapely.get_parts(shapely.simplify(merged, tolerance))
+        # One line at a time: simplifying the whole multi-line is about 20 times slower.
+        parts = shapely.simplify(shapely.get_parts(merged), tolerance)
         parts = parts[shapely.length(parts) >= tolerance]
         if not len(parts):
             continue
         line = shapely.set_precision(shapely.multilinestrings(parts), tolerance / 10)
         folium.GeoJson(
-            json.loads(shapely.to_geojson(line)), pane="roads",
+            json.loads(shapely.to_geojson(line)), pane="roads", interactive=False,
             style_function=lambda _, weight=ROAD_WEIGHTS[road_class]: {
                 "color": "#555555", "weight": weight, "opacity": 0.6 if on_top else 0.45},
-            attribution="Roads: TomTom Orbis Maps. Contains OpenStreetMap data, ODbL.",
+            attribution='Roads: © <a href="https://www.tomtom.com/">TomTom</a> Orbis Maps, '
+                        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
+                        'contributors',
         ).add_to(chart)
     return chart
 
