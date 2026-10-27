@@ -1,13 +1,19 @@
 # TomTom Data Samples and Use Cases
 
-This repo holds ready to run notebooks for TomTom data published as free samples on data marketplaces like databricks.
+Ready-to-run notebooks for the free TomTom data samples on Databricks Marketplace: hourly
+traffic speeds per road (Traffic Stats), average daily traffic per road (Traffic Volumes), and
+the TomTom Orbis road network in the Overture schema (Orbis Maps). Install a sample, import a
+notebook, and **Run all**.
 
-- **[`getting-started/`](getting-started/)**: one notebook per dataset and per marketplace to get you started in minutes.
-- **[`use-cases/`](use-cases/)**: tailored notebook examples that answer practical real world scenarios end to end.
+- **[`getting-started/`](getting-started/)**: one notebook per dataset that takes you from a
+  freshly installed sample to a first result in minutes.
+- **[`use-cases/`](use-cases/)**: notebooks that join the datasets to answer one industry
+  question end to end.
 
 ## Use cases
 
-Each one answers a single question end to end and needs both the Traffic Stats and Traffic Volumes samples.
+Each one answers a single question end to end. It needs the Traffic Stats and Traffic Volumes
+samples, and draws its maps on the roads of the Orbis Maps sample.
 
 **Insurance**
 
@@ -16,18 +22,21 @@ Each one answers a single question end to end and needs both the Traffic Stats a
 
 ## Getting started
 
-Each dataset is published as a free sample on different data marketplaces, and every notebook here expects one to be attached. To get started with step by step instructions for getting access to the data and running notebooks in each platform:
+Install a sample from Databricks Marketplace, then open its getting started notebook. The
+[Databricks guide](docs/databricks.md) has the steps, the compute to use, and what to check when
+a notebook fails.
 
-| Dataset | What it measures | TomTom docs | Databricks |
+| Dataset | What it measures | Notebook | TomTom docs |
 |---|---|---|---|
-| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) | [docs](docs/databricks.md) |
-| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) | [docs](docs/databricks.md) |
-| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [Overture schema](https://docs.overturemaps.org/schema/reference/transportation/segment/) | [docs](docs/databricks.md) |
+| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [traffic-stats](getting-started/traffic-stats/) | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
+| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [traffic-volumes](getting-started/traffic-volumes/) | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
+| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [orbis-maps](getting-started/orbis-maps/) | [Overture schema](https://docs.overturemaps.org/schema/reference/transportation/segment/) |
 
+The samples are metropolitan extracts rather than whole countries. Traffic Stats and Traffic
+Volumes cover London, Austin, Los Angeles and Melbourne. Orbis Maps covers the first three, on
+the same extents, so the datasets join with each other, which is what the use cases do.
 
-The samples are geographic extracts rather than whole countries, and samples are meant to overlap in regions provided so joined dataset uses cases are possible.
-
-Would you like to access this on another platform? Let us know which one, as we grow our presence on platforms continuously to make it as easy as possible for you.
+Want the samples on another platform? Open an issue and say which one.
 
 ## Licence and support
 
@@ -35,6 +44,7 @@ The code in this repository is Apache-2.0. It does not cover the data: use of th
 governed by the
 [TomTom terms and conditions](https://docs.tomtom.com/legal/terms-and-conditions).
 
-Questions about a marketplace listing, a wider extract, more history, or a commercial licence, contact: `marketplacesupport@tomtom.com`.
+Questions about a marketplace listing, a wider extract, more history, or a commercial licence:
+[marketplacesupport@tomtom.com](mailto:marketplacesupport@tomtom.com).
 
 Problems with the code here: open an issue.

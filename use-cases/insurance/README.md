@@ -10,7 +10,8 @@ so one rating has to cover roads that behave nothing alike.
 | [`territory-risk-assessment/`](territory-risk-assessment/) | Where and when are the risky kilometres driven, and how does a driver compare with the road? No claims needed, any of the four regions. |
 | [`territory-risk-modeling/`](territory-risk-modeling/) | How far does road data get a postcode with no claims history, and which parts of it help? |
 
-Both need the TomTom Traffic Stats and Traffic Volumes samples.
+Both need the TomTom Traffic Stats and Traffic Volumes samples, and draw their maps on the
+roads of the TomTom Orbis Maps sample.
 
 ## Terms
 

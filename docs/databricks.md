@@ -10,7 +10,8 @@ You need a Databricks workspace with Unity Catalog. Free accounts work.
 
 In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats**,
 **TomTom Traffic Volumes** or **TomTom Orbis Maps**, and click **Get instant access** on the
-listing. The use cases need both traffic listings.
+listing. The use cases need all three: the two traffic listings for the analysis, and Orbis
+Maps for the roads their maps are drawn on.
 
 **Keep the suggested catalog name** when you install. Every notebook here defaults to it, so
 none of them needs editing. Unity Catalog ignores case in names.
@@ -39,7 +40,10 @@ workspace.
 
 ## 3. Run
 
-Attach the notebook to serverless compute, or to a cluster on Databricks Runtime 16.2 or later.
+Attach the notebook to serverless compute on environment version 4 or later, or to a cluster on
+Databricks Runtime 16.2 or later. Earlier serverless environments run an older Python, which the
+territory risk modeling notebook cannot install its packages on. To change it, open the
+notebook's **Environment** panel.
 
 Each notebook opens with widgets for the catalog names and, where relevant, a date and a region.
 The defaults match the suggested catalog names and data present in the samples, so **Run all**
