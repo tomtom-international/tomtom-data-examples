@@ -55,6 +55,7 @@ postcode is drawn from the postcode locations inside it. The terms are defined i
 
 ## What you need
 
-The TomTom Traffic Stats and Traffic Volumes samples. The notebook downloads the open UK data
+The TomTom Traffic Stats and Traffic Volumes samples, and the TomTom Orbis Maps sample,
+whose roads the map is drawn on. The notebook downloads the open UK data
 itself. With the defaults, a run takes about four and a half minutes on serverless compute. As
 a serverless job it uses 2 to 3 DBU, which is $1 to $1.50 at list price.

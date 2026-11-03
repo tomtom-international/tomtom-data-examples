@@ -45,6 +45,8 @@ not quiet. The terms are defined in the
 
 ## What you need
 
-The TomTom Traffic Stats and Traffic Volumes samples. With the defaults, a run takes about
+The TomTom Traffic Stats and Traffic Volumes samples, and the TomTom Orbis Maps sample,
+whose roads the maps are drawn on. Orbis Maps has no Melbourne extract, so there the maps
+have no roads. With the defaults, a run takes about
 four and a half minutes on serverless compute. As a serverless job it uses about 4 DBU, which
 is about $2 at list price.

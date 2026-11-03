@@ -19,9 +19,10 @@
 # MAGIC roads -> map cells -> postcodes -> model -> explanation
 # MAGIC ```
 # MAGIC
-# MAGIC **What you need.** Two free TomTom samples from Databricks Marketplace: Traffic Stats,
-# MAGIC hourly speeds per road, and Traffic Volumes, average daily traffic per road. The notebook
-# MAGIC runs on the `london` extract, which reaches across southern England.
+# MAGIC **What you need.** Three free TomTom samples from Databricks Marketplace: Traffic Stats,
+# MAGIC hourly speeds per road, Traffic Volumes, average daily traffic per road, and Orbis Maps,
+# MAGIC the road network the map is drawn on. The notebook runs on the `london` extract, which
+# MAGIC reaches across southern England.
 # MAGIC
 # MAGIC **What stands in for claims.** Claims are private, so the notebook downloads two open
 # MAGIC datasets instead: injury collisions reported to the police in Great Britain
@@ -89,10 +90,55 @@ def download(url, name):
         urllib.request.urlretrieve(url, path)
     return path
 
+
+ROAD_WEIGHTS = {"motorway": 2.5, "trunk": 2, "primary": 1.5}
+MAJOR_ROADS = list(ROAD_WEIGHTS)
+
+
+def basemap(bounds, classes, tolerance, on_top=False):
+    """A map drawn on the Orbis roads inside `bounds`, [[south, west], [north, east]], with no
+    tile service. Pieces shorter than `tolerance` degrees are dropped to keep the map light.
+    `on_top` draws the roads over filled shapes, which still receive the hovers."""
+    (south, west), (north, east) = bounds
+    roads = collect(f"""
+        SELECT class AS road_class, geometry FROM {maps}.segment
+        WHERE region = '{REGION}' AND subtype = 'road'
+          AND class IN ({", ".join(f"'{c}'" for c in classes)})
+          AND bbox.xmax >= {west} AND bbox.xmin <= {east}
+          AND bbox.ymax >= {south} AND bbox.ymin <= {north}
+        """)
+    if roads.empty:
+        print(f"Orbis Maps has no roads for region '{REGION}', so this map is drawn without them.")
+    lines = shapely.from_wkb(roads.geometry.map(bytes).to_numpy())
+
+    chart = folium.Map(tiles=None)
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.folium-map.leaflet-container{background:#f4f4f2;}</style>"))
+    folium.map.CustomPane("roads", z_index=450 if on_top else 350).add_to(chart)
+    for road_class in reversed(classes):  # minor roads first, so the major ones draw over them
+        merged = shapely.line_merge(
+            shapely.multilinestrings(lines[(roads.road_class == road_class).to_numpy()]))
+        # One line at a time: simplifying the whole multi-line is about 20 times slower.
+        parts = shapely.simplify(shapely.get_parts(merged), tolerance)
+        parts = parts[shapely.length(parts) >= tolerance]
+        if not len(parts):
+            continue
+        line = shapely.set_precision(shapely.multilinestrings(parts), tolerance / 10)
+        folium.GeoJson(
+            json.loads(shapely.to_geojson(line)), pane="roads", interactive=False,
+            style_function=lambda _, weight=ROAD_WEIGHTS[road_class]: {
+                "color": "#555555", "weight": weight, "opacity": 0.6 if on_top else 0.45},
+            attribution='Roads: © <a href="https://www.tomtom.com/">TomTom</a> Orbis Maps, '
+                        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
+                        'contributors',
+        ).add_to(chart)
+    return chart
+
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
 dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
+dbutils.widgets.text("maps_catalog", "TomTom_Orbis_Maps", "Orbis Maps catalog")
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 dbutils.widgets.text("first_date", "2025-09-01", "First Traffic Stats date, UTC")
 dbutils.widgets.text("last_date", "2025-09-07", "Last Traffic Stats date, UTC")
@@ -100,6 +146,7 @@ dbutils.widgets.dropdown("postcode_level", "sector", ["sector", "district"], "Po
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
 volumes = dbutils.widgets.get("volumes_catalog") + ".traffic_volumes"
+maps = dbutils.widgets.get("maps_catalog") + ".orbis_maps"
 vintage_year = int(dbutils.widgets.get("vintage_year"))
 first_date = dbutils.widgets.get("first_date")
 last_date = dbutils.widgets.get("last_date")
@@ -107,13 +154,13 @@ postcode_level = dbutils.widgets.get("postcode_level")
 
 REGION = "london"  # the collisions and postcodes are British, so the region is fixed
 
-for schema in (stats, volumes):
+for schema in (stats, volumes, maps):
     try:
         spark.sql(f"DESCRIBE SCHEMA {schema}")
     except Exception as error:
         raise ValueError(
             f"Cannot read {schema}. The error was: {error}. Set the catalog widgets at the top "
-            f"of this notebook to the catalogs you accepted when you installed the two "
+            f"of this notebook to the catalogs you accepted when you installed the three "
             f"listings. Run SHOW CATALOGS if you are not sure what they were called."
         ) from None
 
@@ -645,7 +692,8 @@ plt.show()
 # MAGIC Across the whole territory the effect looks like this. Red is where the road data raises
 # MAGIC the rating and blue is where it lowers it. Red follows the major roads more closely than
 # MAGIC it follows the towns, which is the sign that the features carry road information and not
-# MAGIC a headcount. Hover a postcode to see what its roads did to the prediction.
+# MAGIC a headcount. The lines are the motorways, trunk and primary roads from Orbis Maps. Hover a
+# MAGIC postcode to see what its roads did to the prediction.
 
 # COMMAND ----------
 
@@ -662,9 +710,6 @@ scale = branca.colormap.LinearColormap(
     caption="Effect of the road features, log scale")
 scale.tick_labels = [-limit, -limit / 2, 0, limit / 2, limit]
 
-chart = folium.Map(tiles="OpenStreetMap")
-chart.get_root().header.add_child(folium.Element(
-    "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.9) brightness(1.1);}</style>"))
 drawn = folium.GeoJson(
     {"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": row._asdict(),
@@ -679,7 +724,9 @@ drawn = folium.GeoJson(
         aliases=[postcode_level.title(), "Road features multiply the prediction by",
                  "Predicted collisions", "Observed collisions"]),
     smooth_factor=0.5,
-).add_to(chart)
+)
+chart = basemap(drawn.get_bounds(), MAJOR_ROADS, tolerance=0.001, on_top=True)
+drawn.add_to(chart)
 scale.add_to(chart)
 chart.fit_bounds(drawn.get_bounds())
 display(chart)

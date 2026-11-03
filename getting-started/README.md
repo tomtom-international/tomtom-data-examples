@@ -7,9 +7,10 @@ result, and runs unedited if you accepted the catalog name the marketplace sugge
 |---|---|---|
 | `traffic-stats/` | TomTom Traffic Stats | Databricks |
 | `traffic-volumes/` | TomTom Traffic Volumes | Databricks |
+| `orbis-maps/` | TomTom Orbis Maps | Databricks |
 
 Each notebook covers what is in the tables and walks through an exploration of them: coverage
-first, then distributions, then the temporal patterns, then the same roads on a map. They are
+first, then distributions, then the patterns, then the same roads on a map. They are
 open explorations rather than worked models. For a scored, end-to-end answer see `use-cases/`.
 
 Charts use matplotlib, seaborn and folium, all of which ship with Databricks Runtime except
