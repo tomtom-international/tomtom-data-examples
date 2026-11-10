@@ -21,16 +21,14 @@
 # MAGIC
 # MAGIC **What you need.** Three free TomTom samples from Databricks Marketplace: Traffic Stats,
 # MAGIC hourly speeds per road, Traffic Volumes, average daily traffic per road, and Orbis Maps,
-# MAGIC the road network the map is drawn on. The notebook runs on the `london` extract, which
-# MAGIC reaches across southern England.
+# MAGIC the road network with the postcode of every road, which draws the postcodes and the map.
+# MAGIC The notebook runs on the `london` extract, which reaches across southern England.
 # MAGIC
-# MAGIC **What stands in for claims.** Claims are private, so the notebook downloads two open
-# MAGIC datasets instead: injury collisions reported to the police in Great Britain
+# MAGIC **What stands in for claims.** Claims are private, so the notebook downloads injury
+# MAGIC collisions reported to the police in Great Britain
 # MAGIC ([STATS19](https://www.data.gov.uk/dataset/cb7ae6f0-4be6-4935-9277-47e5ce24a11f/road-accidents-safety-data))
-# MAGIC and postcode locations from Ordnance Survey
-# MAGIC ([Code-Point Open](https://www.ordnancesurvey.co.uk/products/code-point-open)).
-# MAGIC Collisions are not claims, but they are the event behind most of them. Your own claims
-# MAGIC table replaces them in section 2.
+# MAGIC instead. Collisions are not claims, but they are the event behind most of them. Your own
+# MAGIC claims table replaces them in section 2.
 
 # COMMAND ----------
 
@@ -43,7 +41,6 @@ import io
 import json
 import tempfile
 import urllib.request
-import zipfile
 from pathlib import Path
 
 import branca
@@ -69,8 +66,8 @@ with contextlib.redirect_stderr(io.StringIO()):
 
 sns.set_theme(style="whitegrid", palette="colorblind")
 
-# Both open datasets give British National Grid coordinates, in metres. Distances are measured
-# there; latitude and longitude are only for H3 and the maps.
+# Distances are measured on the British National Grid, in metres, which is how the collisions
+# arrive; latitude and longitude are only for H3 and the maps.
 TO_WGS84 = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 TO_GRID = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
 
@@ -271,10 +268,11 @@ display(pd.DataFrame({
 # MAGIC %md
 # MAGIC ## 2. Map cells into a modelling table
 # MAGIC
-# MAGIC Postcode outlines are licensed, so the notebook uses the open alternative: every cell
-# MAGIC joins the postcode whose addresses are nearest. Collisions are placed the same way, which
-# MAGIC keeps the features and the target on one definition of a postcode. That rule also draws
-# MAGIC the postcode, so the maps later on show the areas the model actually used.
+# MAGIC Orbis Maps gives every road its postcode, so the roads draw the postcodes: every cell
+# MAGIC joins the postcode that most of its roads carry. A cell whose roads carry none, such as a
+# MAGIC stretch of motorway, joins the nearest cell that has one. Collisions are placed the same
+# MAGIC way, which keeps the features and the target on one definition of a postcode. That rule
+# MAGIC also draws the postcode, so the maps later on show the areas the model actually used.
 # MAGIC
 # MAGIC Then comes the step that decides what the features mean. Traffic is summed, and speed
 # MAGIC behaviour is averaged **weighted by traffic**, so each road speaks as loudly as the number
@@ -285,57 +283,73 @@ display(pd.DataFrame({
 
 # COMMAND ----------
 
-CODEPOINT_URL = ("https://api.os.uk/downloads/v1/products/CodePointOpen/downloads"
-                 "?area=GB&format=CSV&redirect")
-MAX_ASSIGNMENT_M = 1500  # further than this from an address, nobody lives there to insure
+MAX_ASSIGNMENT_M = 1500  # further than this from a road with a postcode, nobody lives there to insure
 
-with zipfile.ZipFile(download(CODEPOINT_URL, "codepo_gb.zip")) as archive:
-    postcodes = pd.concat(
-        pd.read_csv(archive.open(name), header=None, usecols=[0, 1, 2, 3],
-                    names=["postcode", "quality", "easting", "northing"])
-        for name in archive.namelist() if name.startswith("Data/CSV/") and name.endswith(".csv")
-    )
-postcodes = postcodes[(postcodes.quality < 90) & (postcodes.easting > 0)].copy()
-postcodes["postcode"] = postcodes.postcode.str.upper().str.replace(r"\s+", " ", regex=True)
-outward, inward = postcodes.postcode.str[:-3].str.strip(), postcodes.postcode.str[-3:]
-postcodes["district"] = outward                      # SW10
-postcodes["sector"] = outward + " " + inward.str[0]  # SW10 0
-postcodes["lon"], postcodes["lat"] = TO_WGS84.transform(postcodes.easting.values,
-                                                          postcodes.northing.values)
+# A road carries its full postcode, SW10 0AB, or only its district, SW10, which is all most
+# motorways have. The pattern reads the chosen level from either.
+LEVEL_PATTERN = {"sector": "^([A-Z]{1,2}[0-9][0-9A-Z]? [0-9])",     # SW10 0
+                 "district": "^([A-Z]{1,2}[0-9][0-9A-Z]?)"}[postcode_level]  # SW10
+spark.sql(f"""
+    CREATE OR REPLACE TEMPORARY VIEW road_postcodes AS
+    SELECT s.geometry, p.detailed, code, regexp_extract(code, '{LEVEL_PATTERN}', 1) AS postcode
+    FROM {maps}.segment s
+    LATERAL VIEW explode(s.postal_codes) e AS p
+    LATERAL VIEW explode(p.postal_codes) c AS code
+    WHERE s.region = '{REGION}' AND s.subtype = 'road'
+    """)
 
-centroids = np.array([h3.cell_to_latlng(cell) for cell in cells.h3_r9])
-cells["lat"], cells["lon"] = centroids[:, 0], centroids[:, 1]
-cells["easting"], cells["northing"] = TO_GRID.transform(cells.lon.values, cells.lat.values)
+# Each cell takes the postcode most of its roads carry; ties go to the first alphabetically,
+# so a rerun draws the same map.
+labelled = collect("""
+    SELECT h3_r9, postcode FROM (
+        SELECT h3_h3tostring(cell) AS h3_r9, postcode,
+               row_number() OVER (PARTITION BY cell ORDER BY count(*) DESC, postcode) AS rank
+        FROM road_postcodes LATERAL VIEW explode(h3_coverash3(geometry, 9)) h AS cell
+        WHERE postcode != ''
+        GROUP BY cell, postcode)
+    WHERE rank = 1
+    """)
+
+# The size of a postcode is how many full postcodes its roads carry. Each covers about 15
+# addresses, so it stands in for the addresses, and the policies, in the place.
+units = collect("""
+    SELECT postcode, count(DISTINCT code) AS addresses FROM road_postcodes
+    WHERE detailed AND postcode != '' GROUP BY postcode
+    """).set_index("postcode")
+
+for frame in (cells, labelled):
+    centroids = np.array([h3.cell_to_latlng(cell) for cell in frame.h3_r9])
+    frame["lat"], frame["lon"] = centroids[:, 0], centroids[:, 1]
+    frame["easting"], frame["northing"] = TO_GRID.transform(frame.lon.values, frame.lat.values)
 
 # Postcodes reaching outside the extract see only part of their traffic, so they are left out.
-inside = (postcodes.lat.between(cells.lat.min(), cells.lat.max())
-          & postcodes.lon.between(cells.lon.min(), cells.lon.max()))
-at_edge = set(postcodes.loc[~inside, postcode_level])
-postcodes = postcodes[inside].reset_index(drop=True)
+# A road crossing the edge is delivered whole, so its cells outside the extract show them.
+inside = (labelled.lat.between(cells.lat.min(), cells.lat.max())
+          & labelled.lon.between(cells.lon.min(), cells.lon.max()))
+at_edge = set(labelled.loc[~inside, "postcode"])
+labelled = labelled[inside].reset_index(drop=True)
 
-addresses = cKDTree(postcodes[["easting", "northing"]].values)
-distance, nearest = addresses.query(cells[["easting", "northing"]].values,
-                                    distance_upper_bound=MAX_ASSIGNMENT_M)
+lookup = cKDTree(labelled[["easting", "northing"]].values)
+distance, nearest = lookup.query(cells[["easting", "northing"]].values,
+                                 distance_upper_bound=MAX_ASSIGNMENT_M)
 found = np.isfinite(distance)
-cells["postcode"] = np.where(found, postcodes[postcode_level].values[np.where(found, nearest, 0)], None)
+cells["postcode"] = np.where(found, labelled.postcode.values[np.where(found, nearest, 0)], None)
 
-units = postcodes.groupby(postcode_level).agg(addresses=("postcode", "size")).rename_axis("postcode")
-units[["lat", "lon"]] = postcodes.groupby(postcode_level)[["lat", "lon"]].mean()
+units[["lat", "lon"]] = labelled.groupby("postcode")[["lat", "lon"]].mean()
 
-# Nearest address is a Voronoi rule, so drawing it gives the boundary. One tile per address
-# point, merged by postcode, then held to the same reach the assignment uses so that coastal
+# Nearest labelled cell is a Voronoi rule, so drawing it gives the boundary. One tile per
+# cell, merged by postcode, then held to the same reach the assignment uses so that coastal
 # postcodes stop at the coast. Thinned to 150 m as one coverage, so two neighbours keep the
 # same shared border; thinning each outline on its own made neighbours overlap.
-corners = postcodes.drop_duplicates(["easting", "northing"])
-grid = corners[["easting", "northing"]].values
+grid = labelled[["easting", "northing"]].values
 tiles = shapely.voronoi_polygons(
     shapely.MultiPoint(grid), ordered=True,
     extend_to=shapely.box(*grid.min(axis=0) - MAX_ASSIGNMENT_M,
                           *grid.max(axis=0) + MAX_ASSIGNMENT_M))
 outlines = (pd.Series(np.asarray(tiles.geoms, dtype=object))
-            .groupby(corners[postcode_level].values)
+            .groupby(labelled.postcode.values)
             .apply(lambda group: shapely.coverage_union_all(np.asarray(group, dtype=object))))
-spread = (corners.groupby(postcode_level)[["easting", "northing"]]
+spread = (labelled.groupby("postcode")[["easting", "northing"]]
           .apply(lambda group: shapely.multipoints(group.to_numpy())))
 reach = shapely.buffer(shapely.envelope(spread.loc[outlines.index].values),
                        MAX_ASSIGNMENT_M, join_style="mitre")
@@ -380,7 +394,7 @@ features = pd.DataFrame({
     **{column: traffic_weighted(members, column, "vehicle_km_per_day") for column in SPEED_SIGNALS},
     # What a plain average over roads would have said, for the chart below.
     "naive_speed_kph": traffic_weighted(members, "naive_speed_kph", "observed_segments"),
-}).join(units)
+}).join(units, how="inner")
 features = features[(features.vehicle_km_per_day > 0) & ~features.index.isin(at_edge)]
 
 display(pd.Series(TOMTOM_FEATURES).rename("what it measures").to_frame())
@@ -438,12 +452,12 @@ def load_collisions(year):
     ).dropna(subset=["location_easting_osgr", "location_northing_osgr"])
     frame["month"] = pd.to_datetime(frame.date, format="%d/%m/%Y").dt.month
     frame["ksi"] = frame.collision_severity.isin([1, 2])  # killed or seriously injured
-    distance, nearest = addresses.query(
+    distance, nearest = lookup.query(
         frame[["location_easting_osgr", "location_northing_osgr"]].values,
         distance_upper_bound=MAX_ASSIGNMENT_M)
     found = np.isfinite(distance)
     frame = frame[found].copy()
-    frame["postcode"] = postcodes[postcode_level].values[nearest[found]]
+    frame["postcode"] = labelled.postcode.values[nearest[found]]
     return frame[frame.postcode.isin(features.index)]
 
 
@@ -597,15 +611,15 @@ display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
 # MAGIC %md
 # MAGIC Read the results the way an insurer would.
 # MAGIC
-# MAGIC **Without a history, road data does most of the work.** It takes the model from about 10%
-# MAGIC to about 28% of the deviance explained, nearly as far as a full year of claims gets it
-# MAGIC (30%). That is the position of a new market, a new postcode or a thin book, where history
+# MAGIC **Without a history, road data does most of the work.** It takes the model from about 9%
+# MAGIC to about 30% of the deviance explained, about as far as a full year of claims gets it
+# MAGIC (31%). That is the position of a new market, a new postcode or a thin book, where history
 # MAGIC is exactly what is missing. On held-out blocks, where no neighbour was seen in training,
-# MAGIC it is about 25% against 30%.
+# MAGIC it is about 27% against 31%.
 # MAGIC
-# MAGIC **Both datasets earn their place.** Traffic volume alone gets to about 24%: how much driving
+# MAGIC **Both datasets earn their place.** Traffic volume alone gets to about 25%: how much driving
 # MAGIC there is, and how much of it is on major roads. How the traffic drives, which comes from
-# MAGIC Traffic Stats, adds about four more points, and five on held-out territory.
+# MAGIC Traffic Stats, adds about five more points, on held-out territory too.
 # MAGIC
 # MAGIC **For serious collisions, road data beats the history.** Severity follows speed, which the
 # MAGIC road data measures and last year's count does not.
