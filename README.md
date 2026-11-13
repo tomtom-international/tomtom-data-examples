@@ -45,6 +45,7 @@ governed by the
 [TomTom terms and conditions](https://docs.tomtom.com/legal/terms-and-conditions).
 
 Questions about a marketplace listing, a wider extract, more history, or a commercial licence:
-[marketplacesupport@tomtom.com](mailto:marketplacesupport@tomtom.com).
+contact our tech expert team at
+[tomtom.com/talk-with-an-expert](https://www.tomtom.com/talk-with-an-expert).
 
 Problems with the code here: open an issue.

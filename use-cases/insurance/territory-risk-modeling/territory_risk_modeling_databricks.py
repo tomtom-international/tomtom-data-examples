@@ -801,5 +801,5 @@ plt.show()
 # MAGIC **Getting the full data.** The Marketplace samples hold two months of traffic across four
 # MAGIC metropolitan areas. That is enough to measure what the features are worth, which is what
 # MAGIC this notebook does. It is not enough to rate on. A commercial extract can cover the
-# MAGIC markets you write and the years your claims cover. Ask for one at
-# MAGIC `marketplacesupport@tomtom.com`.
+# MAGIC markets you write and the years your claims cover. To ask for one, contact our tech expert
+# MAGIC team at [tomtom.com/talk-with-an-expert](https://www.tomtom.com/talk-with-an-expert).
