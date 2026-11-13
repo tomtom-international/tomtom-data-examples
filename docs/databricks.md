@@ -10,17 +10,18 @@ You need a Databricks workspace with Unity Catalog. Free accounts work.
 
 In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats**,
 **TomTom Traffic Volumes** or **TomTom Orbis Maps**, and click **Get instant access** on the
-listing. The use cases need all three: the two traffic listings for the analysis, and Orbis
-Maps for the roads their maps are drawn on.
+listing. The links in the table below open each listing directly. The use cases need all
+three: the two traffic listings for the analysis, and Orbis Maps for the roads their maps are
+drawn on and the postcodes the modeling notebook rates.
 
 **Keep the suggested catalog name** when you install. Every notebook here defaults to it, so
 none of them needs editing. Unity Catalog ignores case in names.
 
-| Dataset | Catalog | Schema | Tables |
-|---|---|---|---|
-| Traffic Stats | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
-| Traffic Volumes | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
-| Orbis Maps | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
+| Dataset | Listing | Catalog | Schema | Tables |
+|---|---|---|---|---|
+| Traffic Stats | [listing](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats) | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
+| Traffic Volumes | [listing](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes) | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
+| Orbis Maps | coming soon | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
 
 ## 2. Get the notebooks
 

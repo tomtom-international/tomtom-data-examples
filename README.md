@@ -26,11 +26,14 @@ Install a sample from Databricks Marketplace, then open its getting started note
 [Databricks guide](docs/databricks.md) has the steps, the compute to use, and what to check when
 a notebook fails.
 
-| Dataset | What it measures | Notebook | TomTom docs |
-|---|---|---|---|
-| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [traffic-stats](getting-started/traffic-stats/) | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
-| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [traffic-volumes](getting-started/traffic-volumes/) | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
-| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [orbis-maps](getting-started/orbis-maps/) | [Overture schema](https://docs.overturemaps.org/schema/reference/transportation/segment/) |
+| Dataset | What it measures | Marketplace | Notebook | TomTom docs |
+|---|---|---|---|---|
+| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [listing](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats) | [traffic-stats](getting-started/traffic-stats/) | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
+| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [listing](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes) | [traffic-volumes](getting-started/traffic-volumes/) | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
+| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | coming soon | [orbis-maps](getting-started/orbis-maps/) | [docs](https://docs.tomtom.com/tomtom-orbis-maps/documentation/introduction) |
+
+To get a sample from its listing into your workspace, and the catalog name to keep when you
+install, see [Get the data](docs/databricks.md#1-get-the-data) in the Databricks guide.
 
 The samples are metropolitan extracts rather than whole countries. Traffic Stats and Traffic
 Volumes cover London, Austin, Los Angeles and Melbourne. Orbis Maps covers the first three, on
