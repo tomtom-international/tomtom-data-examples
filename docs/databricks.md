@@ -8,17 +8,20 @@ this repository, the compute to run them on, and what to check when a notebook f
 
 You need a Databricks workspace with Unity Catalog. Free accounts work.
 
-In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats** or
-**TomTom Traffic Volumes**, and click **Get instant access** on the listing. The use cases need
-both.
+In the workspace sidebar, click **Marketplace**, search for **TomTom Traffic Stats**,
+**TomTom Traffic Volumes** or **TomTom Orbis Maps**, and click **Get instant access** on the
+listing. The links in the table below open each listing directly. The use cases need all
+three: the two traffic listings for the analysis, and Orbis Maps for the roads their maps are
+drawn on and the postcodes the modeling notebook rates.
 
 **Keep the suggested catalog name** when you install. Every notebook here defaults to it, so
 none of them needs editing. Unity Catalog ignores case in names.
 
-| Dataset | Catalog | Schema | Tables |
-|---|---|---|---|
-| Traffic Stats | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
-| Traffic Volumes | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
+| Dataset | Listing | Catalog | Schema | Tables |
+|---|---|---|---|---|
+| Traffic Stats | [listing](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats) | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
+| Traffic Volumes | [listing](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes) | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
+| Orbis Maps | coming soon | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
 
 ## 2. Get the notebooks
 
@@ -38,7 +41,10 @@ workspace.
 
 ## 3. Run
 
-Attach the notebook to serverless compute, or to a cluster on Databricks Runtime 16.2 or later.
+Attach the notebook to serverless compute on environment version 4 or later, or to a cluster on
+Databricks Runtime 16.2 or later. Earlier serverless environments run an older Python, which the
+territory risk modeling notebook cannot install its packages on. To change it, open the
+notebook's **Environment** panel.
 
 Each notebook opens with widgets for the catalog names and, where relevant, a date and a region.
 The defaults match the suggested catalog names and data present in the samples, so **Run all**

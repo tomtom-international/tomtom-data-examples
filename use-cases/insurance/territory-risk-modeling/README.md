@@ -26,16 +26,16 @@ shows how far road data gets a postcode with no history, what each dataset adds,
 road data adds to a model that already knows the claims. It explains the no-history model
 feature by feature, and ends with two postcodes of the same size with very different roads.
 
-Claims are private, so the notebook downloads police-reported road collisions and postcode
-locations, both open UK data, and uses collisions in place of claims. Your own claims table
-replaces them in one step.
+Claims are private, so the notebook downloads police-reported road collisions, open UK data,
+and uses them in place of claims. Your own claims table replaces them in one step.
 
 ## Why it is built this way
 
 - **Collisions stand in for claims.** They are the event behind most motor claims, and they
   are open, so anyone can rerun the notebook.
-- **Postcode outlines are drawn, not bought.** Each postcode is the area nearest its own
-  addresses, drawn from the open postcode locations.
+- **Postcodes come from the roads.** Orbis Maps gives every road its postcode, so each
+  postcode is the area whose roads carry it, and its size is how many full postcodes they
+  carry.
 - **The size of the postcode is in every model.** It stands for policies in force, and it is
   the density measure that road features are accused of copying.
 - **Two tests.** Held-out months, and held-out blocks of the map, so a tested postcode has no
@@ -49,12 +49,14 @@ replaces them in one step.
 ## Before you use it
 
 Collisions are not claims, although they are the event behind most motor claims. The road
-data is treated as a fixed picture of the roads. Postcode outlines are not open data, so each
-postcode is drawn from the postcode locations inside it. The terms are defined in the
+data is treated as a fixed picture of the roads. Postcode outlines are drawn from the
+postcodes on the roads, so they are close to the official ones but not the same. The terms are
+defined in the
 [insurance README](https://github.com/tomtom-international/tomtom-data-examples/blob/main/use-cases/insurance/README.md#terms).
 
 ## What you need
 
-The TomTom Traffic Stats and Traffic Volumes samples. The notebook downloads the open UK data
-itself. With the defaults, a run takes about four and a half minutes on serverless compute. As
+The TomTom Traffic Stats and Traffic Volumes samples, and the TomTom Orbis Maps sample,
+whose roads give the postcodes and draw the map. The notebook downloads the collisions
+itself. With the defaults, a run takes about seven minutes on serverless compute. As
 a serverless job it uses 2 to 3 DBU, which is $1 to $1.50 at list price.

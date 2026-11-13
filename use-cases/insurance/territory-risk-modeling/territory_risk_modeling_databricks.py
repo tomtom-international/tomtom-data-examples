@@ -19,17 +19,16 @@
 # MAGIC roads -> map cells -> postcodes -> model -> explanation
 # MAGIC ```
 # MAGIC
-# MAGIC **What you need.** Two free TomTom samples from Databricks Marketplace: Traffic Stats,
-# MAGIC hourly speeds per road, and Traffic Volumes, average daily traffic per road. The notebook
-# MAGIC runs on the `london` extract, which reaches across southern England.
+# MAGIC **What you need.** Three free TomTom samples from Databricks Marketplace: Traffic Stats,
+# MAGIC hourly speeds per road, Traffic Volumes, average daily traffic per road, and Orbis Maps,
+# MAGIC the road network with the postcode of every road, which draws the postcodes and the map.
+# MAGIC The notebook runs on the `london` extract, which reaches across southern England.
 # MAGIC
-# MAGIC **What stands in for claims.** Claims are private, so the notebook downloads two open
-# MAGIC datasets instead: injury collisions reported to the police in Great Britain
+# MAGIC **What stands in for claims.** Claims are private, so the notebook downloads injury
+# MAGIC collisions reported to the police in Great Britain
 # MAGIC ([STATS19](https://www.data.gov.uk/dataset/cb7ae6f0-4be6-4935-9277-47e5ce24a11f/road-accidents-safety-data))
-# MAGIC and postcode locations from Ordnance Survey
-# MAGIC ([Code-Point Open](https://www.ordnancesurvey.co.uk/products/code-point-open)).
-# MAGIC Collisions are not claims, but they are the event behind most of them. Your own claims
-# MAGIC table replaces them in section 2.
+# MAGIC instead. Collisions are not claims, but they are the event behind most of them. Your own
+# MAGIC claims table replaces them in section 2.
 
 # COMMAND ----------
 
@@ -42,7 +41,6 @@ import io
 import json
 import tempfile
 import urllib.request
-import zipfile
 from pathlib import Path
 
 import branca
@@ -68,8 +66,8 @@ with contextlib.redirect_stderr(io.StringIO()):
 
 sns.set_theme(style="whitegrid", palette="colorblind")
 
-# Both open datasets give British National Grid coordinates, in metres. Distances are measured
-# there; latitude and longitude are only for H3 and the maps.
+# Distances are measured on the British National Grid, in metres, which is how the collisions
+# arrive; latitude and longitude are only for H3 and the maps.
 TO_WGS84 = Transformer.from_crs("EPSG:27700", "EPSG:4326", always_xy=True)
 TO_GRID = Transformer.from_crs("EPSG:4326", "EPSG:27700", always_xy=True)
 
@@ -89,10 +87,55 @@ def download(url, name):
         urllib.request.urlretrieve(url, path)
     return path
 
+
+ROAD_WEIGHTS = {"motorway": 2.5, "trunk": 2, "primary": 1.5}
+MAJOR_ROADS = list(ROAD_WEIGHTS)
+
+
+def basemap(bounds, classes, tolerance, on_top=False):
+    """A map drawn on the Orbis roads inside `bounds`, [[south, west], [north, east]], with no
+    tile service. Pieces shorter than `tolerance` degrees are dropped to keep the map light.
+    `on_top` draws the roads over filled shapes, which still receive the hovers."""
+    (south, west), (north, east) = bounds
+    roads = collect(f"""
+        SELECT class AS road_class, geometry FROM {maps}.segment
+        WHERE region = '{REGION}' AND subtype = 'road'
+          AND class IN ({", ".join(f"'{c}'" for c in classes)})
+          AND bbox.xmax >= {west} AND bbox.xmin <= {east}
+          AND bbox.ymax >= {south} AND bbox.ymin <= {north}
+        """)
+    if roads.empty:
+        print(f"Orbis Maps has no roads for region '{REGION}', so this map is drawn without them.")
+    lines = shapely.from_wkb(roads.geometry.map(bytes).to_numpy())
+
+    chart = folium.Map(tiles=None)
+    chart.get_root().header.add_child(folium.Element(
+        "<style>.folium-map.leaflet-container{background:#f4f4f2;}</style>"))
+    folium.map.CustomPane("roads", z_index=450 if on_top else 350).add_to(chart)
+    for road_class in reversed(classes):  # minor roads first, so the major ones draw over them
+        merged = shapely.line_merge(
+            shapely.multilinestrings(lines[(roads.road_class == road_class).to_numpy()]))
+        # One line at a time: simplifying the whole multi-line is about 20 times slower.
+        parts = shapely.simplify(shapely.get_parts(merged), tolerance)
+        parts = parts[shapely.length(parts) >= tolerance]
+        if not len(parts):
+            continue
+        line = shapely.set_precision(shapely.multilinestrings(parts), tolerance / 10)
+        folium.GeoJson(
+            json.loads(shapely.to_geojson(line)), pane="roads", interactive=False,
+            style_function=lambda _, weight=ROAD_WEIGHTS[road_class]: {
+                "color": "#555555", "weight": weight, "opacity": 0.6 if on_top else 0.45},
+            attribution='Roads: © <a href="https://www.tomtom.com/">TomTom</a> Orbis Maps, '
+                        '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> '
+                        'contributors',
+        ).add_to(chart)
+    return chart
+
 # COMMAND ----------
 
 dbutils.widgets.text("stats_catalog", "TomTom_Traffic_Stats", "Traffic Stats catalog")
 dbutils.widgets.text("volumes_catalog", "TomTom_Traffic_Volumes", "Traffic Volumes catalog")
+dbutils.widgets.text("maps_catalog", "TomTom_Orbis_Maps", "Orbis Maps catalog")
 dbutils.widgets.text("vintage_year", "2025", "Traffic Volumes vintage")
 dbutils.widgets.text("first_date", "2025-09-01", "First Traffic Stats date, UTC")
 dbutils.widgets.text("last_date", "2025-09-07", "Last Traffic Stats date, UTC")
@@ -100,6 +143,7 @@ dbutils.widgets.dropdown("postcode_level", "sector", ["sector", "district"], "Po
 
 stats = dbutils.widgets.get("stats_catalog") + ".traffic_stats_batch"
 volumes = dbutils.widgets.get("volumes_catalog") + ".traffic_volumes"
+maps = dbutils.widgets.get("maps_catalog") + ".orbis_maps"
 vintage_year = int(dbutils.widgets.get("vintage_year"))
 first_date = dbutils.widgets.get("first_date")
 last_date = dbutils.widgets.get("last_date")
@@ -107,13 +151,13 @@ postcode_level = dbutils.widgets.get("postcode_level")
 
 REGION = "london"  # the collisions and postcodes are British, so the region is fixed
 
-for schema in (stats, volumes):
+for schema in (stats, volumes, maps):
     try:
         spark.sql(f"DESCRIBE SCHEMA {schema}")
     except Exception as error:
         raise ValueError(
             f"Cannot read {schema}. The error was: {error}. Set the catalog widgets at the top "
-            f"of this notebook to the catalogs you accepted when you installed the two "
+            f"of this notebook to the catalogs you accepted when you installed the three "
             f"listings. Run SHOW CATALOGS if you are not sure what they were called."
         ) from None
 
@@ -224,10 +268,11 @@ display(pd.DataFrame({
 # MAGIC %md
 # MAGIC ## 2. Map cells into a modelling table
 # MAGIC
-# MAGIC Postcode outlines are licensed, so the notebook uses the open alternative: every cell
-# MAGIC joins the postcode whose addresses are nearest. Collisions are placed the same way, which
-# MAGIC keeps the features and the target on one definition of a postcode. That rule also draws
-# MAGIC the postcode, so the maps later on show the areas the model actually used.
+# MAGIC Orbis Maps gives every road its postcode, so the roads draw the postcodes: every cell
+# MAGIC joins the postcode that most of its roads carry. A cell whose roads carry none, such as a
+# MAGIC stretch of motorway, joins the nearest cell that has one. Collisions are placed the same
+# MAGIC way, which keeps the features and the target on one definition of a postcode. That rule
+# MAGIC also draws the postcode, so the maps later on show the areas the model actually used.
 # MAGIC
 # MAGIC Then comes the step that decides what the features mean. Traffic is summed, and speed
 # MAGIC behaviour is averaged **weighted by traffic**, so each road speaks as loudly as the number
@@ -238,57 +283,73 @@ display(pd.DataFrame({
 
 # COMMAND ----------
 
-CODEPOINT_URL = ("https://api.os.uk/downloads/v1/products/CodePointOpen/downloads"
-                 "?area=GB&format=CSV&redirect")
-MAX_ASSIGNMENT_M = 1500  # further than this from an address, nobody lives there to insure
+MAX_ASSIGNMENT_M = 1500  # further than this from a road with a postcode, nobody lives there to insure
 
-with zipfile.ZipFile(download(CODEPOINT_URL, "codepo_gb.zip")) as archive:
-    postcodes = pd.concat(
-        pd.read_csv(archive.open(name), header=None, usecols=[0, 1, 2, 3],
-                    names=["postcode", "quality", "easting", "northing"])
-        for name in archive.namelist() if name.startswith("Data/CSV/") and name.endswith(".csv")
-    )
-postcodes = postcodes[(postcodes.quality < 90) & (postcodes.easting > 0)].copy()
-postcodes["postcode"] = postcodes.postcode.str.upper().str.replace(r"\s+", " ", regex=True)
-outward, inward = postcodes.postcode.str[:-3].str.strip(), postcodes.postcode.str[-3:]
-postcodes["district"] = outward                      # SW10
-postcodes["sector"] = outward + " " + inward.str[0]  # SW10 0
-postcodes["lon"], postcodes["lat"] = TO_WGS84.transform(postcodes.easting.values,
-                                                          postcodes.northing.values)
+# A road carries its full postcode, SW10 0AB, or only its district, SW10, which is all most
+# motorways have. The pattern reads the chosen level from either.
+LEVEL_PATTERN = {"sector": "^([A-Z]{1,2}[0-9][0-9A-Z]? [0-9])",     # SW10 0
+                 "district": "^([A-Z]{1,2}[0-9][0-9A-Z]?)"}[postcode_level]  # SW10
+spark.sql(f"""
+    CREATE OR REPLACE TEMPORARY VIEW road_postcodes AS
+    SELECT s.geometry, p.detailed, code, regexp_extract(code, '{LEVEL_PATTERN}', 1) AS postcode
+    FROM {maps}.segment s
+    LATERAL VIEW explode(s.postal_codes) e AS p
+    LATERAL VIEW explode(p.postal_codes) c AS code
+    WHERE s.region = '{REGION}' AND s.subtype = 'road'
+    """)
 
-centroids = np.array([h3.cell_to_latlng(cell) for cell in cells.h3_r9])
-cells["lat"], cells["lon"] = centroids[:, 0], centroids[:, 1]
-cells["easting"], cells["northing"] = TO_GRID.transform(cells.lon.values, cells.lat.values)
+# Each cell takes the postcode most of its roads carry; ties go to the first alphabetically,
+# so a rerun draws the same map.
+labelled = collect("""
+    SELECT h3_r9, postcode FROM (
+        SELECT h3_h3tostring(cell) AS h3_r9, postcode,
+               row_number() OVER (PARTITION BY cell ORDER BY count(*) DESC, postcode) AS rank
+        FROM road_postcodes LATERAL VIEW explode(h3_coverash3(geometry, 9)) h AS cell
+        WHERE postcode != ''
+        GROUP BY cell, postcode)
+    WHERE rank = 1
+    """)
+
+# The size of a postcode is how many full postcodes its roads carry. Each covers about 15
+# addresses, so it stands in for the addresses, and the policies, in the place.
+units = collect("""
+    SELECT postcode, count(DISTINCT code) AS addresses FROM road_postcodes
+    WHERE detailed AND postcode != '' GROUP BY postcode
+    """).set_index("postcode")
+
+for frame in (cells, labelled):
+    centroids = np.array([h3.cell_to_latlng(cell) for cell in frame.h3_r9])
+    frame["lat"], frame["lon"] = centroids[:, 0], centroids[:, 1]
+    frame["easting"], frame["northing"] = TO_GRID.transform(frame.lon.values, frame.lat.values)
 
 # Postcodes reaching outside the extract see only part of their traffic, so they are left out.
-inside = (postcodes.lat.between(cells.lat.min(), cells.lat.max())
-          & postcodes.lon.between(cells.lon.min(), cells.lon.max()))
-at_edge = set(postcodes.loc[~inside, postcode_level])
-postcodes = postcodes[inside].reset_index(drop=True)
+# A road crossing the edge is delivered whole, so its cells outside the extract show them.
+inside = (labelled.lat.between(cells.lat.min(), cells.lat.max())
+          & labelled.lon.between(cells.lon.min(), cells.lon.max()))
+at_edge = set(labelled.loc[~inside, "postcode"])
+labelled = labelled[inside].reset_index(drop=True)
 
-addresses = cKDTree(postcodes[["easting", "northing"]].values)
-distance, nearest = addresses.query(cells[["easting", "northing"]].values,
-                                    distance_upper_bound=MAX_ASSIGNMENT_M)
+lookup = cKDTree(labelled[["easting", "northing"]].values)
+distance, nearest = lookup.query(cells[["easting", "northing"]].values,
+                                 distance_upper_bound=MAX_ASSIGNMENT_M)
 found = np.isfinite(distance)
-cells["postcode"] = np.where(found, postcodes[postcode_level].values[np.where(found, nearest, 0)], None)
+cells["postcode"] = np.where(found, labelled.postcode.values[np.where(found, nearest, 0)], None)
 
-units = postcodes.groupby(postcode_level).agg(addresses=("postcode", "size")).rename_axis("postcode")
-units[["lat", "lon"]] = postcodes.groupby(postcode_level)[["lat", "lon"]].mean()
+units[["lat", "lon"]] = labelled.groupby("postcode")[["lat", "lon"]].mean()
 
-# Nearest address is a Voronoi rule, so drawing it gives the boundary. One tile per address
-# point, merged by postcode, then held to the same reach the assignment uses so that coastal
+# Nearest labelled cell is a Voronoi rule, so drawing it gives the boundary. One tile per
+# cell, merged by postcode, then held to the same reach the assignment uses so that coastal
 # postcodes stop at the coast. Thinned to 150 m as one coverage, so two neighbours keep the
 # same shared border; thinning each outline on its own made neighbours overlap.
-corners = postcodes.drop_duplicates(["easting", "northing"])
-grid = corners[["easting", "northing"]].values
+grid = labelled[["easting", "northing"]].values
 tiles = shapely.voronoi_polygons(
     shapely.MultiPoint(grid), ordered=True,
     extend_to=shapely.box(*grid.min(axis=0) - MAX_ASSIGNMENT_M,
                           *grid.max(axis=0) + MAX_ASSIGNMENT_M))
 outlines = (pd.Series(np.asarray(tiles.geoms, dtype=object))
-            .groupby(corners[postcode_level].values)
+            .groupby(labelled.postcode.values)
             .apply(lambda group: shapely.coverage_union_all(np.asarray(group, dtype=object))))
-spread = (corners.groupby(postcode_level)[["easting", "northing"]]
+spread = (labelled.groupby("postcode")[["easting", "northing"]]
           .apply(lambda group: shapely.multipoints(group.to_numpy())))
 reach = shapely.buffer(shapely.envelope(spread.loc[outlines.index].values),
                        MAX_ASSIGNMENT_M, join_style="mitre")
@@ -333,7 +394,7 @@ features = pd.DataFrame({
     **{column: traffic_weighted(members, column, "vehicle_km_per_day") for column in SPEED_SIGNALS},
     # What a plain average over roads would have said, for the chart below.
     "naive_speed_kph": traffic_weighted(members, "naive_speed_kph", "observed_segments"),
-}).join(units)
+}).join(units, how="inner")
 features = features[(features.vehicle_km_per_day > 0) & ~features.index.isin(at_edge)]
 
 display(pd.Series(TOMTOM_FEATURES).rename("what it measures").to_frame())
@@ -391,12 +452,12 @@ def load_collisions(year):
     ).dropna(subset=["location_easting_osgr", "location_northing_osgr"])
     frame["month"] = pd.to_datetime(frame.date, format="%d/%m/%Y").dt.month
     frame["ksi"] = frame.collision_severity.isin([1, 2])  # killed or seriously injured
-    distance, nearest = addresses.query(
+    distance, nearest = lookup.query(
         frame[["location_easting_osgr", "location_northing_osgr"]].values,
         distance_upper_bound=MAX_ASSIGNMENT_M)
     found = np.isfinite(distance)
     frame = frame[found].copy()
-    frame["postcode"] = postcodes[postcode_level].values[nearest[found]]
+    frame["postcode"] = labelled.postcode.values[nearest[found]]
     return frame[frame.postcode.isin(features.index)]
 
 
@@ -550,15 +611,15 @@ display(pd.DataFrame(territory).agg(["mean", "min", "max"]).T.round(1))
 # MAGIC %md
 # MAGIC Read the results the way an insurer would.
 # MAGIC
-# MAGIC **Without a history, road data does most of the work.** It takes the model from about 10%
-# MAGIC to about 28% of the deviance explained, nearly as far as a full year of claims gets it
-# MAGIC (30%). That is the position of a new market, a new postcode or a thin book, where history
+# MAGIC **Without a history, road data does most of the work.** It takes the model from about 9%
+# MAGIC to about 30% of the deviance explained, about as far as a full year of claims gets it
+# MAGIC (31%). That is the position of a new market, a new postcode or a thin book, where history
 # MAGIC is exactly what is missing. On held-out blocks, where no neighbour was seen in training,
-# MAGIC it is about 25% against 30%.
+# MAGIC it is about 27% against 31%.
 # MAGIC
-# MAGIC **Both datasets earn their place.** Traffic volume alone gets to about 24%: how much driving
+# MAGIC **Both datasets earn their place.** Traffic volume alone gets to about 25%: how much driving
 # MAGIC there is, and how much of it is on major roads. How the traffic drives, which comes from
-# MAGIC Traffic Stats, adds about four more points, and five on held-out territory.
+# MAGIC Traffic Stats, adds about five more points, on held-out territory too.
 # MAGIC
 # MAGIC **For serious collisions, road data beats the history.** Severity follows speed, which the
 # MAGIC road data measures and last year's count does not.
@@ -645,7 +706,8 @@ plt.show()
 # MAGIC Across the whole territory the effect looks like this. Red is where the road data raises
 # MAGIC the rating and blue is where it lowers it. Red follows the major roads more closely than
 # MAGIC it follows the towns, which is the sign that the features carry road information and not
-# MAGIC a headcount. Hover a postcode to see what its roads did to the prediction.
+# MAGIC a headcount. The lines are the motorways, trunk and primary roads from Orbis Maps. Hover a
+# MAGIC postcode to see what its roads did to the prediction.
 
 # COMMAND ----------
 
@@ -662,9 +724,6 @@ scale = branca.colormap.LinearColormap(
     caption="Effect of the road features, log scale")
 scale.tick_labels = [-limit, -limit / 2, 0, limit / 2, limit]
 
-chart = folium.Map(tiles="OpenStreetMap")
-chart.get_root().header.add_child(folium.Element(
-    "<style>.leaflet-tile-pane{filter:grayscale(1) contrast(0.9) brightness(1.1);}</style>"))
 drawn = folium.GeoJson(
     {"type": "FeatureCollection", "features": [
         {"type": "Feature", "properties": row._asdict(),
@@ -679,7 +738,9 @@ drawn = folium.GeoJson(
         aliases=[postcode_level.title(), "Road features multiply the prediction by",
                  "Predicted collisions", "Observed collisions"]),
     smooth_factor=0.5,
-).add_to(chart)
+)
+chart = basemap(drawn.get_bounds(), MAJOR_ROADS, tolerance=0.001, on_top=True)
+drawn.add_to(chart)
 scale.add_to(chart)
 chart.fit_bounds(drawn.get_bounds())
 display(chart)
