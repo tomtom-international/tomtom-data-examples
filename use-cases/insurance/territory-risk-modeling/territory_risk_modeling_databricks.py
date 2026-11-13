@@ -668,8 +668,8 @@ plt.show()
 # MAGIC built for it.
 # MAGIC
 # MAGIC The same values answer a more practical question: which postcodes does this change, and by
-# MAGIC how much. Below are two of the same size, which the size-only model cannot tell apart. The
-# MAGIC road data pushes one up and the other down. The bars are how unusual each of their road
+# MAGIC how much. Below are two of the same size, which the size-only model cannot tell apart, and
+# MAGIC whose roads are both well measured. The road data pushes one up and the other down. The bars are how unusual each of their road
 # MAGIC features is, and the waterfall builds the raised prediction one term at a time.
 
 # COMMAND ----------
@@ -679,7 +679,13 @@ road_effect = explanation.values[:, [EXPLAINED.index(column) for column in TOMTO
 existing = predictions["size"]
 
 middle = np.quantile(existing[october], [0.4, 0.6])
-alike = october[(existing[october] >= middle[0]) & (existing[october] <= middle[1])]
+# Only postcodes whose roads are well measured, so the contrast comes from the roads and not
+# from thin data: coverage at least the median, single observations at most the median.
+measured = test.postcode.map(
+    (features.network_coverage_pct >= features.network_coverage_pct.median())
+    & (features.single_observation_pct <= features.single_observation_pct.median())).values
+alike = october[(existing[october] >= middle[0]) & (existing[october] <= middle[1])
+                & measured[october]]
 up, down = alike[road_effect[alike].argmax()], alike[road_effect[alike].argmin()]
 pair = test.iloc[[up, down]].set_index("postcode")
 
@@ -795,5 +801,5 @@ plt.show()
 # MAGIC **Getting the full data.** The Marketplace samples hold two months of traffic across four
 # MAGIC metropolitan areas. That is enough to measure what the features are worth, which is what
 # MAGIC this notebook does. It is not enough to rate on. A commercial extract can cover the
-# MAGIC markets you write and the years your claims cover. Ask for one at
-# MAGIC `marketplacesupport@tomtom.com`.
+# MAGIC markets you write and the years your claims cover. To ask for one, contact our tech expert
+# MAGIC team at [tomtom.com/talk-with-an-expert](https://www.tomtom.com/talk-with-an-expert).
