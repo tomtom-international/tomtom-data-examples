@@ -21,7 +21,7 @@ none of them needs editing. Unity Catalog ignores case in names.
 |---|---|---|---|---|
 | Traffic Stats | [listing](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats) | `TomTom_Traffic_Stats` | `traffic_stats_batch` | `segments`, `hourly_stats` |
 | Traffic Volumes | [listing](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes) | `TomTom_Traffic_Volumes` | `traffic_volumes` | `aadt_segments`, `coverage` |
-| Orbis Maps | coming soon | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
+| Orbis Maps | [listing](https://marketplace.databricks.com/details/c67659f9-b681-4c5b-a1f6-50a422102dd9/TomTom_Orbis-Maps) | `TomTom_Orbis_Maps` | `orbis_maps` | `segment`, `connector`, `traffic_sign`, `traffic_signal`, `signpost` |
 
 ## 2. Get the notebooks
 
