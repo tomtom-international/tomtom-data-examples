@@ -28,9 +28,9 @@ a notebook fails.
 
 | Dataset | What it measures | Databricks | TomTom docs |
 |---|---|---|---|
-| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [sample](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats), [docs](docs/databricks.md), [notebooks](getting-started/traffic-stats/) | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
-| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [sample](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes), [docs](docs/databricks.md), [notebooks](getting-started/traffic-volumes/) | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
-| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [sample](https://marketplace.databricks.com/details/c67659f9-b681-4c5b-a1f6-50a422102dd9/TomTom_Orbis-Maps), [docs](docs/databricks.md), [notebooks](getting-started/orbis-maps/) | [docs](https://docs.tomtom.com/tomtom-orbis-maps/documentation/introduction) |
+| **Traffic Stats** | Hourly speed and travel time statistics for individual road segments, from anonymised probe vehicles. | [sample, docs and notebooks](https://marketplace.databricks.com/details/2fef5730-7ec7-498f-bd46-e53d5eb61e53/TomTom_Traffic-Stats) | [docs](https://docs.tomtom.com/traffic-stats/documentation/batch/introduction) |
+| **Traffic Volumes** | Annual average daily traffic per road segment, with a profile for every hour of the week. | [sample, docs and notebooks](https://marketplace.databricks.com/details/402bfd69-8015-4d8b-8420-a1856792f9a1/TomTom_Traffic-Volumes) | [docs](https://docs.tomtom.com/historical-traffic-volumes/documentation/product-information/introduction) |
+| **Orbis Maps** | The TomTom Orbis road network in the Overture schema, with speed limits, speed profiles, signs and signals. | [sample, docs and notebooks](https://marketplace.databricks.com/details/c67659f9-b681-4c5b-a1f6-50a422102dd9/TomTom_Orbis-Maps) | [docs](https://docs.tomtom.com/tomtom-orbis-maps/documentation/introduction) |
 
 The samples are metropolitan extracts rather than whole countries. Traffic Stats and Traffic
 Volumes cover London, Austin, Los Angeles and Melbourne. Orbis Maps covers the first three, on
